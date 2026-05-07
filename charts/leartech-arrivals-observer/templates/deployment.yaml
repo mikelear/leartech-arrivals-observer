@@ -35,8 +35,16 @@ spec:
         env:
         - name: PORT
           value: "8080"
+        # CLUSTER_ID read from the well-known jx-cluster-config configmap so
+        # the chart self-identifies on both gsm + akv clusters without a
+        # per-cluster values override. Falls back to .Values.config.cluster
+        # for non-JX environments (preview, kind, dev).
         - name: CLUSTER_ID
-          value: {{ .Values.config.cluster | quote }}
+          valueFrom:
+            configMapKeyRef:
+              name: jx-cluster-config
+              key: CLUSTER_ID
+              optional: true
         - name: LOG_LEVEL
           value: {{ .Values.config.logLevel | quote }}
         {{- if .Values.database.enabled }}
