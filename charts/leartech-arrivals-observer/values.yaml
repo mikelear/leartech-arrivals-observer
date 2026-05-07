@@ -107,3 +107,32 @@ podAnnotations: {}
 nodeSelector: {}
 tolerations: []
 affinity: {}
+
+# Per-service dispatch config — the watcher reads this map at ReplicaSet
+# events and embeds stagingUrl + testPacks into each Arrival's spec.
+# Service name = app.kubernetes.io/name on the ReplicaSet. Services NOT in
+# this map produce Arrivals with empty testPacks → controller marks them
+# Skipped (recorded but not tested). Override per-cluster from
+# `helmfiles/jx-staging/configs/leartech-arrivals-observer.yaml`.
+#
+# Example:
+#   services:
+#     leartech-qa-canary:
+#       stagingUrl: https://leartech-qa-canary.jx.leartech.com
+#       testPacks:
+#         - { name: smoke, type: end2end }
+services: {}
+
+# Test dispatch tunables. timeoutMinutes is wall-clock per Arrival; once
+# elapsed, remaining tests get Timeout and the Arrival is finalized.
+dispatch:
+  timeoutMinutes: 30
+  pollIntervalSeconds: 30
+  # Container image used by the dispatched K8s Job to run a test pack
+  # against the arrival's stagingUrl. The image is responsible for
+  # writing results to gs://<bucket>/results/v1/post-deploy/<svc>/<sha>/
+  # <cluster>/<pack>/<test>.json. For 2.7.2 first cut we stub the dispatch
+  # (no Job created); this image setting is plumbed through for 2.7.2b.
+  runnerImage: ghcr.io/mikelear/leartech-test-runner:0.0.1
+  # Result-store bucket — same pattern as pre-merge end2end results.
+  resultStoreBucket: test-artifacts-product-first

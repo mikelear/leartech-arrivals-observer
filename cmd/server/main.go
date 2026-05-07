@@ -25,6 +25,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 
 	"github.com/mikelear/leartech-arrivals-observer/internal/config"
+	"github.com/mikelear/leartech-arrivals-observer/internal/controller"
 	"github.com/mikelear/leartech-arrivals-observer/internal/handlers"
 	"github.com/mikelear/leartech-arrivals-observer/internal/middleware"
 	"github.com/mikelear/leartech-arrivals-observer/internal/tracing"
@@ -71,19 +72,42 @@ func run() error {
 		}
 	}()
 
+	services, err := cfg.LoadServices()
+	if err != nil {
+		return fmt.Errorf("load services map: %w", err)
+	}
+	log.Info().Int("services", len(services)).Msg("services map loaded")
+
 	// Start the ReplicaSet informer + Arrival CR creator in a goroutine.
 	// On every Added event matching the filter (chart-managed Deployments
 	// in cfg.WatchNamespace), upserts an Arrival CR keyed by
-	// <service>-<version>-<namespace>.
+	// <service>-<version>-<namespace>. Per-service stagingUrl + testPacks
+	// come from the services map (chart values).
 	w, err := watcher.New(ctx, watcher.Config{
 		Namespace:      cfg.WatchNamespace,
 		ClusterID:      cfg.ClusterID,
 		KubeConfigPath: cfg.KubeConfigPath, // empty = in-cluster
+		Services:       services,
 	})
 	if err != nil {
 		return fmt.Errorf("init watcher: %w", err)
 	}
 	go w.Run(ctx)
+
+	// Start the Arrival lifecycle controller. Drives Pending → Skipped /
+	// Testing / Passed / Failed / Timeout. Phase 2.7.2 first cut: stub
+	// dispatch (no real K8s Job); 2.7.2b will swap in real Job dispatch
+	// + result-store polling without changing the state machine.
+	ctrl, err := controller.New(ctx, controller.Config{
+		Namespace:      cfg.WatchNamespace,
+		KubeConfigPath: cfg.KubeConfigPath,
+		PollInterval:   cfg.DispatchPollInterval(),
+		Timeout:        cfg.DispatchTimeout(),
+	})
+	if err != nil {
+		return fmt.Errorf("init controller: %w", err)
+	}
+	go ctrl.Run(ctx)
 
 	// Health + metrics HTTP server (K8s probes, Prometheus scrape).
 	router := gin.New()

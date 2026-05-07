@@ -17,12 +17,12 @@ package watcher
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
 	"github.com/rs/zerolog/log"
 	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -34,6 +34,8 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
+
+	"github.com/mikelear/leartech-arrivals-observer/internal/config"
 )
 
 // Config controls the watcher's behaviour.
@@ -52,6 +54,12 @@ type Config struct {
 	// ResyncPeriod for the informer. 0 disables resync — fine for spike;
 	// bump if event drops are observed.
 	ResyncPeriod time.Duration
+
+	// Services is the per-service dispatch config map. The watcher embeds
+	// stagingUrl + testPacks from this map into each Arrival's spec at
+	// ReplicaSet event time. Services not in the map produce Arrivals with
+	// empty stagingUrl + testPacks → controller marks them Skipped.
+	Services map[string]config.ServiceConfig
 }
 
 // Watcher is the running ReplicaSet observer.
@@ -170,7 +178,14 @@ func (w *Watcher) handleReplicaSetAdd(ctx context.Context, obj any) {
 // upsertArrival creates an Arrival CR if absent, idempotent on existing.
 // Spec.deployedAt updates to now() on every observation so a rolling restart
 // of the same version refreshes the timestamp without changing identity.
+//
+// stagingUrl + testPacks come from the services map (chart values). Services
+// not in the map land with empty stagingUrl + testPacks; the controller
+// marks those Skipped. Spec is rewritten on every observation so chart-side
+// services map edits propagate without a rolling restart.
 func (w *Watcher) upsertArrival(ctx context.Context, rs *appsv1.ReplicaSet, arrivalName, service, version string) error {
+	svcCfg, hasCfg := w.cfg.Services[service]
+
 	cr := &unstructured.Unstructured{}
 	cr.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   arrivalGVR.Group,
@@ -201,6 +216,20 @@ func (w *Watcher) upsertArrival(ctx context.Context, rs *appsv1.ReplicaSet, arri
 	if err := unstructured.SetNestedField(cr.Object, deployedAt, "spec", "deployedAt"); err != nil {
 		return err
 	}
+	if hasCfg && svcCfg.StagingURL != "" {
+		if err := unstructured.SetNestedField(cr.Object, svcCfg.StagingURL, "spec", "stagingUrl"); err != nil {
+			return err
+		}
+	}
+	if hasCfg && len(svcCfg.TestPacks) > 0 {
+		packs := make([]any, 0, len(svcCfg.TestPacks))
+		for _, p := range svcCfg.TestPacks {
+			packs = append(packs, map[string]any{"name": p.Name, "type": p.Type})
+		}
+		if err := unstructured.SetNestedSlice(cr.Object, packs, "spec", "testPacks"); err != nil {
+			return err
+		}
+	}
 
 	_, err := w.clients.dynamic.Resource(arrivalGVR).
 		Namespace(w.cfg.Namespace).
@@ -211,8 +240,28 @@ func (w *Watcher) upsertArrival(ctx context.Context, rs *appsv1.ReplicaSet, arri
 	if !apierrors.IsAlreadyExists(err) {
 		return err
 	}
-	// Already exists → patch deployedAt only (existing status preserved).
-	patch := []byte(fmt.Sprintf(`{"spec":{"deployedAt":%q,"replicaSet":%q}}`, deployedAt, rs.Name))
+	// Already exists → merge-patch the dispatch-relevant spec fields.
+	// Status is on its own subresource so this never clobbers controller writes.
+	patchObj := map[string]any{
+		"spec": map[string]any{
+			"deployedAt": deployedAt,
+			"replicaSet": rs.Name,
+		},
+	}
+	if hasCfg && svcCfg.StagingURL != "" {
+		patchObj["spec"].(map[string]any)["stagingUrl"] = svcCfg.StagingURL
+	}
+	if hasCfg && len(svcCfg.TestPacks) > 0 {
+		packs := make([]map[string]any, 0, len(svcCfg.TestPacks))
+		for _, p := range svcCfg.TestPacks {
+			packs = append(packs, map[string]any{"name": p.Name, "type": p.Type})
+		}
+		patchObj["spec"].(map[string]any)["testPacks"] = packs
+	}
+	patch, err := json.Marshal(patchObj)
+	if err != nil {
+		return fmt.Errorf("marshal patch: %w", err)
+	}
 	_, err = w.clients.dynamic.Resource(arrivalGVR).
 		Namespace(w.cfg.Namespace).
 		Patch(ctx, arrivalName, types.MergePatchType, patch, metav1.PatchOptions{})
@@ -251,7 +300,3 @@ func buildRestConfig(kubeconfig string) (*rest.Config, error) {
 	return rest.InClusterConfig()
 }
 
-// Compile-time enforcement that we import corev1 (for label selector helpers
-// added in 2.7.2). Drop when actually used. Comment kept to avoid an unused
-// import lint failure today vs needing a longer refactor next session.
-var _ = corev1.NamespaceDefault

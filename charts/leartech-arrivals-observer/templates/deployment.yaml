@@ -29,6 +29,9 @@ spec:
         - name: http
           containerPort: 8080
           protocol: TCP
+        envFrom:
+        - configMapRef:
+            name: {{ include "leartech.fullname" . }}
         env:
         - name: PORT
           value: "8080"

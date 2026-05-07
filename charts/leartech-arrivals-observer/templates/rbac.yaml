@@ -1,14 +1,13 @@
 {{/*
 RBAC for the arrivals-observer ServiceAccount. Same-namespace as the
-deployment (jx-staging today). Two concerns:
+deployment (jx-staging today). Three concerns:
 
 1. ReplicaSet watch — observer's K8s informer needs get/list/watch on
    apps/replicasets in the watch namespace.
-2. Arrival CR create+patch — observer creates Arrival CRs and patches
-   spec.deployedAt + replicaSet on rolling restarts of same version.
-
-Future: Phase 2.7.2 adds K8s Job dispatch for tests; that needs
-batch/jobs create perms — extend this Role at that point.
+2. Arrival CR create/patch (watcher) + get/list/watch + status/patch
+   (controller).
+3. Phase 2.7.2b will add batch/jobs create+watch+delete for real test
+   dispatch (today's stub controller doesn't need it).
 */}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role

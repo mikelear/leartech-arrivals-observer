@@ -56,13 +56,27 @@ spec:
               suspectedPR:
                 type: integer
                 description: GitHub PR number, populated when known
+              stagingUrl:
+                type: string
+                description: Base URL the dispatcher will point tests at (set from chart values.services map; empty = no dispatch)
+              testPacks:
+                type: array
+                description: Test packs to run on this arrival (set from chart values.services[<name>].testPacks)
+                items:
+                  type: object
+                  required: [name, type]
+                  properties:
+                    name: { type: string }
+                    type:
+                      type: string
+                      enum: [end2end, end2end-ui, contract, unit, load]
           status:
             type: object
             x-kubernetes-preserve-unknown-fields: true
             properties:
               phase:
                 type: string
-                enum: [Pending, Testing, Passed, Failed, Timeout]
+                enum: [Pending, Testing, Passed, Failed, Timeout, Skipped]
                 default: Pending
               tests:
                 type: array

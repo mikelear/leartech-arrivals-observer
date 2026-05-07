@@ -5,10 +5,11 @@ metadata:
   labels:
     {{- include "leartech.labels" . | nindent 4 }}
 data:
-  # Any non-secret runtime config the service wants to read from a mounted
-  # file goes here. Secrets never go in this ConfigMap — use ExternalSecret.
-  #
-  # Intentionally empty for the template — replace with your own keys when
-  # cloning. If you don't need any file-based config, you can delete this
-  # template entirely.
-  {}
+  # SERVICES_JSON — per-service dispatch config. The watcher parses this
+  # at ReplicaSet events and embeds stagingUrl + testPacks into each
+  # Arrival's spec. Empty map = no service is configured for dispatch.
+  SERVICES_JSON: {{ .Values.services | toJson | quote }}
+  DISPATCH_TIMEOUT_MINUTES: {{ .Values.dispatch.timeoutMinutes | quote }}
+  DISPATCH_POLL_INTERVAL_SECONDS: {{ .Values.dispatch.pollIntervalSeconds | quote }}
+  DISPATCH_RUNNER_IMAGE: {{ .Values.dispatch.runnerImage | quote }}
+  DISPATCH_RESULT_STORE_BUCKET: {{ .Values.dispatch.resultStoreBucket | quote }}
