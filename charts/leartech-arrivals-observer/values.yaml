@@ -60,10 +60,9 @@ tracing:
 # Postgres wiring — DB credentials come from ExternalSecret (ESO) referencing
 # the cluster's secret backend (GSM on GCP, AKV on Azure).
 database:
-  # Master switch. Default true = real service with Postgres. Set to false
-  # for the template's own self-deploy or any "shell-mode" preview where
-  # no DB is needed — `/health/ready` will pass without a DB ping.
-  enabled: true
+  # arrivals-observer has no DB — it watches K8s and writes Arrival CRs.
+  # Keeping the block so the chart stays template-shaped, but default off.
+  enabled: false
 
   # Name of the database within the shared Postgres cluster. Per golden-std:
   # database-per-service, no cross-DB joins.
@@ -76,7 +75,7 @@ database:
   # ExternalSecret (ESO) — syncs the DATABASE_URL from the cluster's secret
   # backend. Disable for local/kind or if you provision the secret manually.
   externalSecret:
-    enabled: true
+    enabled: false
     # Name of the SecretStore/ClusterSecretStore to sync from
     storeRef: cluster-secret-store
     storeKind: ClusterSecretStore
@@ -84,7 +83,7 @@ database:
     remoteKey: ""
 
 migrations:
-  enabled: true
+  enabled: false
   image:
     repository: ghcr.io/kukymbr/goose-docker
     tag: "3.22.1"
