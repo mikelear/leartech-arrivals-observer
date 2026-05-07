@@ -1,0 +1,93 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "leartech.fullname" . }}
+  labels:
+    {{- include "leartech.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "leartech.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "leartech.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "leartech.serviceAccountName" . }}
+      securityContext:
+        {{- include "leartech.podSecurityContext" . | nindent 8 }}
+      containers:
+      - name: app
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        env:
+        - name: PORT
+          value: "8080"
+        - name: CLUSTER_ID
+          value: {{ .Values.config.cluster | quote }}
+        - name: LOG_LEVEL
+          value: {{ .Values.config.logLevel | quote }}
+        {{- if .Values.database.enabled }}
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.database.secretName }}
+              key: {{ .Values.database.secretKey }}
+        {{- end }}
+        - name: AUTH_TOKENURL
+          value: {{ .Values.auth.tokenUrl | quote }}
+        - name: AUTH_CLIENTID
+          value: {{ .Values.auth.clientId | quote }}
+        - name: AUTH_CLIENTSECRET
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "leartech.fullname" . }}-auth
+              key: clientSecret
+              optional: true
+        - name: AUTH_AUDIENCE
+          value: {{ .Values.auth.audience | quote }}
+        {{- if .Values.tracing.enabled }}
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: {{ .Values.tracing.endpoint | quote }}
+        {{- else }}
+        - name: OTEL_TRACES_DISABLED
+          value: "1"
+        {{- end }}
+        securityContext:
+          {{- include "leartech.containerSecurityContext" . | nindent 10 }}
+        livenessProbe:
+          {{- include "leartech.livenessProbe" . | nindent 10 }}
+        readinessProbe:
+          {{- include "leartech.readinessProbe" . | nindent 10 }}
+        startupProbe:
+          {{- include "leartech.startupProbe" . | nindent 10 }}
+        resources:
+          {{- include "leartech.resources" . | nindent 10 }}
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      # readOnlyRootFilesystem=true requires writable volumes for anything that writes
+      - name: tmp
+        emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

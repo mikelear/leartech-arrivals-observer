@@ -1,0 +1,22 @@
+image:
+  repository: "{{ requiredEnv "DOCKER_REGISTRY" }}/{{ requiredEnv "DOCKER_REGISTRY_ORG" }}/{{ requiredEnv "APP_NAME" }}"
+  tag: "{{ requiredEnv "VERSION" }}"
+
+replicaCount: 1
+
+# jxRequirements override for preview
+jxRequirements:
+  ingress:
+    namespaceSubDomain: "-pr{{ requiredEnv "PULL_NUMBER" }}."
+
+config:
+  cluster: '{{ env "CLUSTER_ID" | default "" }}'
+  logLevel: debug
+
+# Looser resources for previews
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi

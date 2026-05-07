@@ -1,0 +1,54 @@
+apiVersion: config.lighthouse.jenkins-x.io/v1alpha1
+kind: TriggerConfig
+spec:
+  presubmits:
+  - name: pr
+    context: "pr"
+    always_run: true
+    source: pullrequest.yaml
+  - name: lint
+    context: "lint"
+    always_run: true
+    source: lint.yaml
+  - name: test
+    context: "test"
+    always_run: true
+    source: test.yaml
+  - name: govulncheck
+    context: "govulncheck"
+    always_run: true
+    source: govulncheck.yaml
+  - name: security-scan
+    context: "security-scan"
+    always_run: true
+    source: security-scan/pullrequest.yaml
+  - name: image-scan
+    context: "image-scan"
+    always_run: true
+    source: security-scan/image-scan.yaml
+  - name: dynamic-scan
+    context: "dynamic-scan"
+    always_run: true
+    source: security-scan/dynamic/pullrequest.yaml
+  - name: ai-review
+    context: "ai-review"
+    always_run: true
+    source: ai-review/pullrequest.yaml
+  - name: end2end
+    context: "end2end"
+    always_run: true
+    optional: true
+    source: end2end.yaml
+  - name: ai-feedback
+    context: ai-feedback
+    always_run: false
+    optional: true
+    trigger: "(?m)^/ai-feedback"
+    rerun_command: "/ai-feedback"
+    source: ai-review/feedback.yaml
+  postsubmits:
+  - name: release
+    context: release
+    source: release.yaml
+    branches:
+    - ^main$

@@ -1,0 +1,40 @@
+environments:
+  default:
+    values:
+    - jx-values.yaml
+---
+helmDefaults:
+  timeout: 600
+repositories:
+- name: jx3
+  url: https://jenkins-x-charts.github.io/repo
+
+# Preview ingress host: <service>-prN.<domain>
+# Domain comes from jx-values.yaml (populated by jx preview create per cluster).
+{{- $namespace := requiredEnv "PREVIEW_NAMESPACE" }}
+{{- $appName := requiredEnv "APP_NAME" }}
+
+releases:
+- chart: jx3/jx-verify
+  name: jx-verify
+  namespace: '{{ $namespace }}'
+
+- chart: '../charts/{{ $appName }}'
+  name: preview
+  wait: true
+  createNamespace: true
+  namespace: '{{ $namespace }}'
+  values:
+  - jx-values.yaml
+  - values.yaml.gotmpl
+  set:
+  # Shell mode for the template's own preview — no DB provisioned.
+  # Real consumers should REMOVE these overrides once they wire up
+  # a real preview DB ExternalSecret.
+  - name: database.enabled
+    value: false
+  - name: migrations.enabled
+    value: false
+
+# Preview URL: https://<service>-prN.<domain>
+# Domain is cluster-specific. /health/live, /openapi.json, /docs reachable.

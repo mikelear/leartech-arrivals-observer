@@ -1,0 +1,46 @@
+{{/*
+RBAC for the arrivals-observer ServiceAccount. Same-namespace as the
+deployment (jx-staging today). Two concerns:
+
+1. ReplicaSet watch — observer's K8s informer needs get/list/watch on
+   apps/replicasets in the watch namespace.
+2. Arrival CR create+patch — observer creates Arrival CRs and patches
+   spec.deployedAt + replicaSet on rolling restarts of same version.
+
+Future: Phase 2.7.2 adds K8s Job dispatch for tests; that needs
+batch/jobs create perms — extend this Role at that point.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "leartech.fullname" . }}
+  labels:
+    {{- include "leartech.labels" . | nindent 4 }}
+rules:
+- apiGroups: ["apps"]
+  resources: ["replicasets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["qa.leartech.com"]
+  resources: ["arrivals"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
+- apiGroups: ["qa.leartech.com"]
+  resources: ["arrivals/status"]
+  verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "leartech.fullname" . }}
+  labels:
+    {{- include "leartech.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "leartech.fullname" . }}
+subjects:
+- kind: ServiceAccount
+  name: {{ include "leartech.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}

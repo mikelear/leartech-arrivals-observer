@@ -1,0 +1,49 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "schedule": ["before 9am on Monday"],
+  "platformAutomerge": true,
+  "packageRules": [
+    {
+      "matchUpdateTypes": ["patch"],
+      "automerge": true,
+      "groupName": "patch updates"
+    },
+    {
+      "matchUpdateTypes": ["minor"],
+      "groupName": "minor updates"
+    },
+    {
+      "matchManagers": ["helmv3"],
+      "groupName": "helm chart updates"
+    },
+    {
+      "matchManagers": ["dockerfile"],
+      "groupName": "docker base image updates"
+    },
+    {
+      "matchPackageNames": ["ghcr.io/mikelear/leartech-go-runtime"],
+      "groupName": "leartech-go-runtime",
+      "automerge": true
+    },
+    {
+      "matchManagers": ["gomod"],
+      "matchPackagePatterns": [
+        "^github.com/mikelear/leartech-go-common",
+        "^github.com/mikelear/leartech-go-packages/"
+      ],
+      "groupName": "leartech internal libs",
+      "schedule": ["at any time"],
+      "automerge": true,
+      "automergeStrategy": "squash"
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "fileMatch": ["\\.lighthouse/.+\\.yaml$"],
+      "matchStrings": ["image:\\s*(?<depName>[^:\\s]+):(?<currentValue>[^\\s]+)"],
+      "datasourceTemplate": "docker"
+    }
+  ]
+}

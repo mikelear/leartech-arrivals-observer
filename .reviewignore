@@ -1,0 +1,9 @@
+# Files excluded from AI code review.
+# Pattern is git-pathspec-style globs, one per line.
+
+docs/docs.go
+docs/swagger.json
+docs/swagger.yaml
+go.sum
+*.tgz
+migrations/*.sql

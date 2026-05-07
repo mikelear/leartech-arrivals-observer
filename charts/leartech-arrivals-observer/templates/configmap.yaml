@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "leartech.fullname" . }}
+  labels:
+    {{- include "leartech.labels" . | nindent 4 }}
+data:
+  # Any non-secret runtime config the service wants to read from a mounted
+  # file goes here. Secrets never go in this ConfigMap — use ExternalSecret.
+  #
+  # Intentionally empty for the template — replace with your own keys when
+  # cloning. If you don't need any file-based config, you can delete this
+  # template entirely.
+  {}

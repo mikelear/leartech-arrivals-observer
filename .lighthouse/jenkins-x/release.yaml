@@ -1,0 +1,33 @@
+apiVersion: tekton.dev/v1beta1
+kind: PipelineRun
+metadata:
+  creationTimestamp: null
+  name: release
+spec:
+  pipelineSpec:
+    tasks:
+    - name: from-build-pack
+      resources: {}
+      taskSpec:
+        metadata: {}
+        stepTemplate:
+          image: uses:mikelear/leartech-pipeline-catalog/tasks/go/release.yaml@main
+          name: ""
+          resources: {}
+          workingDir: /workspace/source
+        steps:
+        - name: ""
+          resources: {}
+    # No openapi-generation: arrivals-observer is a K8s controller, not an
+    # HTTP API service. It exposes only health + metrics endpoints (kept
+    # from the template for liveness/readiness probes + Prometheus scrape).
+    # Per Session 0c lesson #5 — drop openapi-generation for non-API services.
+  podTemplate:
+    tolerations:
+    - key: sku
+      operator: Equal
+      value: build
+      effect: NoSchedule
+  serviceAccountName: tekton-bot
+  timeout: 12h0m0s
+status: {}

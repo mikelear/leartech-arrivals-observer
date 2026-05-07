@@ -1,0 +1,110 @@
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: ""  # set by release.yaml promote-changelog step
+  tag: ""         # set by release.yaml promote-changelog step
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+service:
+  name: leartech-arrivals-observer
+  type: ClusterIP
+  port: 8080
+  externalPort: 8080
+
+# Ingress annotations + overrides (domain comes from jxRequirements)
+ingress:
+  annotations: {}
+  pathType: ImplementationSpecific
+  labels: {}
+
+# jxRequirements — auto-populated from jx-values.yaml per cluster/env.
+# Do NOT hardcode domains here.
+jxRequirements:
+  ingress:
+    annotations: {}
+    apiVersion: "networking.k8s.io/v1"
+    domain: ""
+    externalDNS: false
+    namespaceSubDomain: -jx.
+    serviceType: ""
+    tls:
+      email: ""
+      enabled: false
+      production: false
+      secretName: ""
+
+knativeDeploy: false
+
+# Runtime config that ends up in the ConfigMap + mounted / env-injected.
+# Override per env via configs/<env>.yaml or preview helmfile set: block.
+config:
+  cluster: ""  # "gcp" | "az" — set from .Values.global or env-specific
+  logLevel: info
+
+# OpenTelemetry traces — emitted via OTLP HTTP to the cluster's Tempo.
+# Default endpoint resolves on both GCP and AZ clusters (same service name
+# in jx-observability). Set tracing.enabled=false to fully no-op the SDK
+# (sets OTEL_TRACES_DISABLED=1 in the container env).
+tracing:
+  enabled: true
+  endpoint: tempo.jx-observability:4318
+
+# Postgres wiring — DB credentials come from ExternalSecret (ESO) referencing
+# the cluster's secret backend (GSM on GCP, AKV on Azure).
+database:
+  # Master switch. Default true = real service with Postgres. Set to false
+  # for the template's own self-deploy or any "shell-mode" preview where
+  # no DB is needed — `/health/ready` will pass without a DB ping.
+  enabled: true
+
+  # Name of the database within the shared Postgres cluster. Per golden-std:
+  # database-per-service, no cross-DB joins.
+  name: leartech_go_service_template
+  # Secret name ESO syncs from the cloud backend.
+  secretName: leartech-arrivals-observer-db
+  # Key inside that secret holding the full DSN.
+  secretKey: DATABASE_URL
+
+  # ExternalSecret (ESO) — syncs the DATABASE_URL from the cluster's secret
+  # backend. Disable for local/kind or if you provision the secret manually.
+  externalSecret:
+    enabled: true
+    # Name of the SecretStore/ClusterSecretStore to sync from
+    storeRef: cluster-secret-store
+    storeKind: ClusterSecretStore
+    # Remote key in the backend — defaults to {{ fullname }}-database-url
+    remoteKey: ""
+
+migrations:
+  enabled: true
+  image:
+    repository: ghcr.io/kukymbr/goose-docker
+    tag: "3.22.1"
+
+# go-common auth.Config — populated as env vars with AUTH_ prefix
+auth:
+  tokenUrl: ""
+  clientId: ""
+  clientSecret: ""  # from ExternalSecret, not values
+  audience: ""
+
+probes:
+  liveness: {}
+  readiness: {}
+  startup: {}
+
+resources: {}  # library defaults apply if empty
+
+podAnnotations: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

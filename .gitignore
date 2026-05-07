@@ -1,0 +1,24 @@
+bin/
+cover.out
+coverage.html
+*.test
+*.out
+
+# All of docs/ is committed: docs.go (Go embed glue) + swagger.json/yaml
+# (the OpenAPI spec). The release pipeline's codegen task is a SEPARATE
+# Tekton pod with its own git-clone — it can only see what's committed,
+# so the spec must live in git, not be regenerated at build time. Run
+# `make swag` whenever you touch swagger annotations and commit docs/.
+
+.idea/
+.vscode/
+.DS_Store
+
+# Local env files — never commit secrets
+.env
+.env.local
+pr-logs/
+
+# Merged lint config — fetched+merged at runtime from the catalog base
+.golangci.base.yml
+.golangci.merged.yml

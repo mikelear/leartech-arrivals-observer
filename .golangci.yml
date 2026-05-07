@@ -1,0 +1,10 @@
+# Per-repo overrides only (v2 format). Canonical linter config lives at
+# leartech-pipeline-catalog/go/.golangci.base.yml and is merged in by
+# both CI (tasks/go-lint/pullrequest.yaml) and `make lint-config` locally.
+version: "2"
+
+formatters:
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/mikelear/leartech-arrivals-observer
