@@ -133,6 +133,14 @@ dispatch:
   # writing results to gs://<bucket>/results/v1/post-deploy/<svc>/<sha>/
   # <cluster>/<pack>/<test>.json. For 2.7.2 first cut we stub the dispatch
   # (no Job created); this image setting is plumbed through for 2.7.2b.
-  runnerImage: ghcr.io/mikelear/leartech-test-runner:0.0.1
+  # Default test-pack runner image. The `playwright-runner` ships
+  # Playwright + Chromium + gcloud + python + bash + npm — universal for
+  # both end2end (bash run.sh) and end2end-ui (npx playwright test) packs.
+  # Per-test-pack override via `services.<svc>.testPacks[].runnerImage`.
+  runnerImage: us-central1-docker.pkg.dev/product-first/oci/playwright-runner:0.28.0
+  # Kubernetes Secret holding the GCS service-account JSON used by the
+  # runner to upload results.json to the result-store bucket. Must exist
+  # in the watch namespace; same secret as the pre-merge end2end task.
+  gcsKeySecret: test-artifacts-gcs-key
   # Result-store bucket — same pattern as pre-merge end2end results.
   resultStoreBucket: test-artifacts-product-first

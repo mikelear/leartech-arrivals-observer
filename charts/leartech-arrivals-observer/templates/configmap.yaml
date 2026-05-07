@@ -13,3 +13,4 @@ data:
   DISPATCH_POLL_INTERVAL_SECONDS: {{ .Values.dispatch.pollIntervalSeconds | quote }}
   DISPATCH_RUNNER_IMAGE: {{ .Values.dispatch.runnerImage | quote }}
   DISPATCH_RESULT_STORE_BUCKET: {{ .Values.dispatch.resultStoreBucket | quote }}
+  DISPATCH_GCS_KEY_SECRET: {{ .Values.dispatch.gcsKeySecret | quote }}

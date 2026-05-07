@@ -23,9 +23,13 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/mikelear/leartech-arrivals-observer/internal/config"
 	"github.com/mikelear/leartech-arrivals-observer/internal/controller"
+	"github.com/mikelear/leartech-arrivals-observer/internal/dispatch"
 	"github.com/mikelear/leartech-arrivals-observer/internal/handlers"
 	"github.com/mikelear/leartech-arrivals-observer/internal/middleware"
 	"github.com/mikelear/leartech-arrivals-observer/internal/tracing"
@@ -94,15 +98,36 @@ func run() error {
 	}
 	go w.Run(ctx)
 
-	// Start the Arrival lifecycle controller. Drives Pending → Skipped /
-	// Testing / Passed / Failed / Timeout. Phase 2.7.2 first cut: stub
-	// dispatch (no real K8s Job); 2.7.2b will swap in real Job dispatch
-	// + result-store polling without changing the state machine.
+	// Build a kubernetes client for the dispatcher (Job CRUD).
+	kubeClient, err := newKubeClient(cfg.KubeConfigPath)
+	if err != nil {
+		return fmt.Errorf("kubernetes client: %w", err)
+	}
+
+	// Dispatcher = real K8s Job creator + Job-status reader. If the
+	// runner image isn't configured, leave it nil → controller falls
+	// back to stub finalize.
+	var dispatcher *dispatch.Dispatcher
+	if cfg.DispatchRunnerImage != "" {
+		dispatcher = dispatch.New(dispatch.Config{
+			RunnerImage:           cfg.DispatchRunnerImage,
+			ResultStoreBucket:     cfg.DispatchResultStoreBucket,
+			GCSKeySecret:          cfg.DispatchGCSKeySecret,
+			ClusterID:             cfg.ClusterID,
+			ActiveDeadlineSeconds: int64(cfg.DispatchTimeout().Seconds()),
+		}, kubeClient)
+		log.Info().Str("image", cfg.DispatchRunnerImage).Msg("dispatcher enabled")
+	} else {
+		log.Warn().Msg("dispatch.runnerImage empty → controller in stub mode (no real Jobs)")
+	}
+
+	// Start the Arrival lifecycle controller.
 	ctrl, err := controller.New(ctx, controller.Config{
 		Namespace:      cfg.WatchNamespace,
 		KubeConfigPath: cfg.KubeConfigPath,
 		PollInterval:   cfg.DispatchPollInterval(),
 		Timeout:        cfg.DispatchTimeout(),
+		Dispatcher:     dispatcher,
 	})
 	if err != nil {
 		return fmt.Errorf("init controller: %w", err)
@@ -150,4 +175,21 @@ func run() error {
 
 	log.Info().Msg("observer stopped")
 	return nil
+}
+
+// newKubeClient prefers in-cluster, falls back to kubeconfig file.
+func newKubeClient(kubeconfigPath string) (kubernetes.Interface, error) {
+	var (
+		cfg *rest.Config
+		err error
+	)
+	if kubeconfigPath != "" {
+		cfg, err = clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	} else {
+		cfg, err = rest.InClusterConfig()
+	}
+	if err != nil {
+		return nil, err
+	}
+	return kubernetes.NewForConfig(cfg)
 }

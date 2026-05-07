@@ -28,6 +28,9 @@ rules:
 - apiGroups: ["qa.leartech.com"]
   resources: ["arrivals/status"]
   verbs: ["get", "update", "patch"]
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["get", "list", "watch", "create", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

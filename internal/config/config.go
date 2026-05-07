@@ -49,6 +49,7 @@ type Config struct {
 	DispatchPollIntervalSeconds int    `envconfig:"DISPATCH_POLL_INTERVAL_SECONDS" default:"30"`
 	DispatchRunnerImage         string `envconfig:"DISPATCH_RUNNER_IMAGE"`
 	DispatchResultStoreBucket   string `envconfig:"DISPATCH_RESULT_STORE_BUCKET"`
+	DispatchGCSKeySecret        string `envconfig:"DISPATCH_GCS_KEY_SECRET" default:"test-artifacts-gcs-key"`
 }
 
 // Load reads env and returns a populated Config.

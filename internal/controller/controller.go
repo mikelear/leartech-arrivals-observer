@@ -31,6 +31,8 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
+
+	"github.com/mikelear/leartech-arrivals-observer/internal/dispatch"
 )
 
 // Phase enum mirrors the CRD's status.phase enum.
@@ -55,14 +57,19 @@ type Config struct {
 	KubeConfigPath string
 	ResyncPeriod   time.Duration
 
-	// PollInterval is the cadence the controller re-evaluates Testing-phase
-	// arrivals. In stub mode every Pending arrival becomes Passed after one
-	// PollInterval; once 2.7.2b lands this is also the Job-poll cadence.
+	// PollInterval is the controller's reconcile + Job-status-poll cadence.
 	PollInterval time.Duration
 
 	// Timeout is the wall-clock per-Arrival ceiling. Testing arrivals older
 	// than this are forced to PhaseTimeout regardless of test state.
 	Timeout time.Duration
+
+	// Dispatch holds the Job-builder configuration (runner image, GCS
+	// secret, result-store bucket, cluster id). Empty Dispatcher disables
+	// real Job creation and the controller falls back to stub-finalize
+	// (used in unit tests + first-cut deployments before runner image is
+	// available).
+	Dispatcher *dispatch.Dispatcher
 }
 
 // Controller runs the Arrival lifecycle loop.
@@ -77,7 +84,11 @@ type Controller struct {
 	inFlight map[string]time.Time
 }
 
-// New constructs the Controller with K8s clients connected.
+// New constructs the Controller with K8s clients connected. The caller
+// supplies cfg.Dispatcher (already constructed with its own kubernetes
+// client). If Dispatcher is nil the controller falls back to stub
+// finalize — useful for unit tests + early-deploy validation before the
+// runner image is wired.
 func New(_ context.Context, cfg Config) (*Controller, error) {
 	restCfg, err := buildRestConfig(cfg.KubeConfigPath)
 	if err != nil {
@@ -176,11 +187,13 @@ func (c *Controller) reconcileOne(ctx context.Context, u *unstructured.Unstructu
 }
 
 // handlePending triages a fresh arrival: no testPacks → Skipped; otherwise
-// → Testing + record dispatch start time.
+// → dispatch Jobs + flip to Testing.
 func (c *Controller) handlePending(ctx context.Context, u *unstructured.Unstructured) {
 	name := u.GetName()
 	packs, _, _ := unstructured.NestedSlice(u.Object, "spec", "testPacks")
 	stagingURL, _, _ := unstructured.NestedString(u.Object, "spec", "stagingUrl")
+	service, _, _ := unstructured.NestedString(u.Object, "spec", "service")
+	version, _, _ := unstructured.NestedString(u.Object, "spec", "version")
 
 	if len(packs) == 0 {
 		log.Info().Str("arrival", name).Msg("no test packs configured → Skipped")
@@ -191,26 +204,58 @@ func (c *Controller) handlePending(ctx context.Context, u *unstructured.Unstruct
 		return
 	}
 
-	tests := make([]any, 0, len(packs))
+	// Build Test list for the dispatcher.
+	tests := make([]dispatch.Test, 0, len(packs))
 	for _, p := range packs {
 		pm, ok := p.(map[string]any)
 		if !ok {
 			continue
 		}
-		tests = append(tests, map[string]any{
-			"name":       pm["name"],
-			"type":       pm["type"],
+		tests = append(tests, dispatch.Test{
+			PackName: asString(pm["name"]),
+			PackType: asString(pm["type"]),
+		})
+	}
+
+	// Dispatch Jobs (or stub-finalize if no dispatcher configured).
+	var jobNames map[string]string
+	if c.cfg.Dispatcher != nil {
+		var err error
+		jobNames, err = c.cfg.Dispatcher.Dispatch(ctx, dispatch.Args{
+			ArrivalName: name,
+			Namespace:   c.cfg.Namespace,
+			Service:     service,
+			Version:     version,
+			StagingURL:  stagingURL,
+		}, tests)
+		if err != nil {
+			log.Error().Err(err).Str("arrival", name).Msg("dispatch failed; arrival → Failed")
+			c.finalize(ctx, u, PhaseFailed)
+			return
+		}
+	}
+
+	statusTests := make([]any, 0, len(tests))
+	for _, t := range tests {
+		entry := map[string]any{
+			"name":       t.PackName,
+			"type":       t.PackType,
 			"status":     "Running",
 			"startedAt":  time.Now().UTC().Format(time.RFC3339),
 			"retryCount": int64(0),
-		})
+		}
+		if jn, ok := jobNames[t.PackName]; ok {
+			entry["jobName"] = jn
+		}
+		statusTests = append(statusTests, entry)
 	}
 
 	log.Info().
 		Str("arrival", name).
 		Str("stagingUrl", stagingURL).
-		Int("packs", len(packs)).
-		Msg("dispatching tests (stub) — Pending → Testing")
+		Int("packs", len(tests)).
+		Bool("realDispatch", c.cfg.Dispatcher != nil).
+		Msg("dispatching tests — Pending → Testing")
 
 	c.mu.Lock()
 	c.inFlight[name] = time.Now()
@@ -218,14 +263,12 @@ func (c *Controller) handlePending(ctx context.Context, u *unstructured.Unstruct
 
 	c.patchStatus(ctx, name, map[string]any{
 		"phase": PhaseTesting,
-		"tests": tests,
+		"tests": statusTests,
 	})
 }
 
-// handleTesting advances a Testing arrival. Stub behaviour: after one
-// PollInterval, mark all tests Passed and finalize the arrival. Once
-// 2.7.2b lands, this is replaced with real Job-status polling +
-// result-store reads.
+// handleTesting advances a Testing arrival. Polls each test's Job status
+// (real dispatch) or stub-finalizes after PollInterval (no Dispatcher).
 func (c *Controller) handleTesting(ctx context.Context, u *unstructured.Unstructured, name string) {
 	c.mu.Lock()
 	startedAt, dispatched := c.inFlight[name]
@@ -245,13 +288,95 @@ func (c *Controller) handleTesting(ctx context.Context, u *unstructured.Unstruct
 		return
 	}
 
-	// Stub: only finalize once we've held Testing for at least one PollInterval
-	// (otherwise we'd flip Pending → Testing → Passed in a single tick, which
-	// hides the state transition from observers).
-	if time.Since(startedAt) < c.cfg.PollInterval {
+	// No dispatcher: stub mode. After one PollInterval, mark all tests
+	// Passed and finalize the arrival.
+	if c.cfg.Dispatcher == nil {
+		if time.Since(startedAt) < c.cfg.PollInterval {
+			return
+		}
+		c.finalize(ctx, u, PhasePassed)
 		return
 	}
-	c.finalize(ctx, u, PhasePassed)
+
+	// Real dispatch: poll each test's Job. Decide arrival phase from
+	// per-test outcomes: any Running → still Testing; any Failed → Failed
+	// (once all settle); else Passed.
+	tests, _, _ := unstructured.NestedSlice(u.Object, "status", "tests")
+	if len(tests) == 0 {
+		return
+	}
+	updated := make([]any, 0, len(tests))
+	allDone := true
+	anyFailed := false
+	for _, t := range tests {
+		tm, ok := t.(map[string]any)
+		if !ok {
+			continue
+		}
+		curStatus := asString(tm["status"])
+		// Settled tests stay settled.
+		if curStatus == "Passed" || curStatus == "Failed" || curStatus == "Timeout" {
+			if curStatus == "Failed" {
+				anyFailed = true
+			}
+			updated = append(updated, tm)
+			continue
+		}
+		jobName := asString(tm["jobName"])
+		if jobName == "" {
+			updated = append(updated, tm)
+			allDone = false
+			continue
+		}
+		js, err := c.cfg.Dispatcher.GetStatus(ctx, c.cfg.Namespace, jobName)
+		if err != nil {
+			log.Warn().Err(err).Str("job", jobName).Msg("get job status failed")
+			updated = append(updated, tm)
+			allDone = false
+			continue
+		}
+		switch js {
+		case dispatch.JobPassed:
+			tm["status"] = "Passed"
+			tm["completedAt"] = time.Now().UTC().Format(time.RFC3339)
+		case dispatch.JobFailed:
+			tm["status"] = "Failed"
+			tm["completedAt"] = time.Now().UTC().Format(time.RFC3339)
+			anyFailed = true
+		case dispatch.JobRunning, dispatch.JobUnknown:
+			allDone = false
+		}
+		updated = append(updated, tm)
+	}
+
+	if !allDone {
+		// Persist Running/partial test progress so kubectl observers see it.
+		c.patchStatus(ctx, name, map[string]any{"tests": updated})
+		return
+	}
+
+	phase := PhasePassed
+	if anyFailed {
+		phase = PhaseFailed
+	}
+	c.mu.Lock()
+	delete(c.inFlight, name)
+	c.mu.Unlock()
+	c.patchStatus(ctx, name, map[string]any{
+		"phase":       phase,
+		"tests":       updated,
+		"finalizedAt": time.Now().UTC().Format(time.RFC3339),
+	})
+	log.Info().Str("arrival", name).Str("phase", phase).Msg("arrival finalized (real dispatch)")
+}
+
+// asString safely extracts a string from an unstructured map field,
+// tolerating typed string vs interface{} variations.
+func asString(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
 }
 
 // finalize transitions an arrival to a terminal phase, marking each test
