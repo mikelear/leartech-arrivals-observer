@@ -190,10 +190,26 @@ echo "==> stagingUrl=$STAGING_URL cluster=$CLUSTER_ID bucket=$RESULT_STORE_BUCKE
 
 WORK=/tmp/work
 mkdir -p "$WORK" && cd "$WORK"
-git clone --depth=1 --branch "v${VERSION}" "https://github.com/mikelear/${SERVICE}.git" repo 2>&1 || {
-  echo "::ERROR clone failed for v${VERSION}; trying without v prefix"
-  git clone --depth=1 --branch "${VERSION}" "https://github.com/mikelear/${SERVICE}.git" repo
+
+REPO_URL="https://github.com/mikelear/${SERVICE}.git"
+
+# Per-service git tag schemes vary: most services tag as v<version>; the
+# JX-release multi-cluster pattern tags as v<version>-<cluster> (canary).
+# Some don't tag at all (chart-only releases). Try the most-specific
+# refspec first and fall through to less-specific ones, then main.
+clone_with_fallback() {
+  for ref in "v${VERSION}-${CLUSTER_ID}" "v${VERSION}" "${VERSION}" "main"; do
+    [ -z "$ref" ] && continue
+    echo "==> trying clone --branch=$ref"
+    if git clone --depth=1 --branch "$ref" "$REPO_URL" repo 2>/dev/null; then
+      echo "==> cloned at ref=$ref"
+      return 0
+    fi
+  done
+  echo "::FATAL no matching ref found (tried v<ver>-<cluster>, v<ver>, <ver>, main)"
+  return 1
 }
+clone_with_fallback
 cd repo
 
 # Wait up to 10min for stagingUrl health.
