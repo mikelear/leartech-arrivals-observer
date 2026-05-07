@@ -160,8 +160,18 @@ func (c *Controller) reconcileOne(ctx context.Context, u *unstructured.Unstructu
 		c.handlePending(ctx, u)
 	case PhaseTesting:
 		c.handleTesting(ctx, u, name)
+	case PhaseSkipped:
+		// Recover from the watcher/controller race where the controller
+		// saw a stale Arrival (no testPacks) before the new watcher had
+		// merge-patched testPacks in. If spec.testPacks is now non-empty,
+		// flip back to Pending so handlePending can dispatch.
+		packs, _, _ := unstructured.NestedSlice(u.Object, "spec", "testPacks")
+		if len(packs) > 0 {
+			log.Info().Str("arrival", name).Msg("Skipped → Pending (testPacks now present)")
+			c.patchStatus(ctx, name, map[string]any{"phase": PhasePending})
+		}
 	default:
-		// terminal phases ignored
+		// other terminal phases ignored
 	}
 }
 
