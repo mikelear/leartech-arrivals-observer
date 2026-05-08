@@ -133,20 +133,30 @@ func (w *Watcher) Run(ctx context.Context) {
 
 // handleReplicaSetAdd is invoked for every ReplicaSet observed (initial cache
 // fill + subsequent live Add events). Idempotent CR upsert.
+//
+// Label resolution: charts vary in how completely they propagate labels to
+// pod templates. Some (canary, gate, leartech-helm-library users) emit the
+// full set on `spec.template.metadata.labels`, so RS metadata.labels carry
+// `managed-by: Helm`, `version`, etc. Others (auth-service, auth-ui, the 9
+// "hand-rolled _helpers.tpl" cohort) emit only the narrow `selectorLabels`
+// (name + instance) on the pod template — RS metadata.labels won't have
+// `version` or `managed-by` either. To handle both, we look first at RS
+// labels, then fall back to the parent Deployment's metadata.labels (which
+// every chart emits via the outer labels helper). This closes the
+// visibility gap without requiring every consumer chart to migrate.
 func (w *Watcher) handleReplicaSetAdd(ctx context.Context, obj any) {
 	rs, ok := obj.(*appsv1.ReplicaSet)
 	if !ok {
 		return
 	}
 
-	// Filter: only Helm-managed Deployments. Skips Jenkins one-off pods,
-	// system DaemonSets, etc. Tightens noise floor on jx-staging.
-	if rs.Labels["app.kubernetes.io/managed-by"] != "Helm" {
+	managedBy := labelOrDeployment(ctx, w.clients.core, rs, "app.kubernetes.io/managed-by")
+	if managedBy != "Helm" {
 		return
 	}
 
-	service := rs.Labels["app.kubernetes.io/name"]
-	version := rs.Labels["app.kubernetes.io/version"]
+	service := labelOrDeployment(ctx, w.clients.core, rs, "app.kubernetes.io/name")
+	version := labelOrDeployment(ctx, w.clients.core, rs, "app.kubernetes.io/version")
 	if service == "" || version == "" {
 		return
 	}
@@ -298,5 +308,33 @@ func buildRestConfig(kubeconfig string) (*rest.Config, error) {
 		return clientcmd.BuildConfigFromFlags("", kubeconfig)
 	}
 	return rest.InClusterConfig()
+}
+
+// labelOrDeployment reads a label from the ReplicaSet first; if absent,
+// falls back to the parent Deployment's metadata.labels. Charts with
+// hand-rolled _helpers.tpl emit a narrow selectorLabels set on the pod
+// template (just name + instance) but do emit the full label set on the
+// outer Deployment.metadata.labels via the labels helper. So the
+// Deployment is the canonical source for `version` + `managed-by`.
+//
+// Best-effort: if the Deployment lookup fails (RBAC, transient API
+// error) we fall back to whatever was on the RS — failure is just a
+// missed Arrival, never a wrong one.
+func labelOrDeployment(ctx context.Context, core kubernetes.Interface, rs *appsv1.ReplicaSet, key string) string {
+	if v := rs.Labels[key]; v != "" {
+		return v
+	}
+	for _, owner := range rs.OwnerReferences {
+		if owner.Kind != "Deployment" {
+			continue
+		}
+		dep, err := core.AppsV1().Deployments(rs.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
+		if err != nil {
+			log.Debug().Err(err).Str("rs", rs.Name).Str("deployment", owner.Name).Msg("fetch parent deployment failed; using RS labels only")
+			return ""
+		}
+		return dep.Labels[key]
+	}
+	return ""
 }
 
