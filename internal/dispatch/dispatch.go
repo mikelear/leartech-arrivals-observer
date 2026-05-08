@@ -120,6 +120,21 @@ func (d *Dispatcher) buildJob(args Args, t Test, jobName string) *batchv1.Job {
 		{Name: "CLUSTER_ID", Value: d.cfg.ClusterID},
 		{Name: "ARRIVAL_NAME", Value: args.ArrivalName},
 		{Name: "GOOGLE_APPLICATION_CREDENTIALS", Value: "/var/run/secrets/test-artifacts/key.json"},
+		// GitHub auth — most service repos are PRIVATE; without a token
+		// the runner script's `git clone` returns 401 and reports it as
+		// "branch not found" (silent for caller). Use the same secret
+		// Tekton tasks use (`tekton-git/password`); optional so
+		// public-repo tests still work without it.
+		{
+			Name: "GIT_TOKEN",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "tekton-git"},
+					Key:                  "password",
+					Optional:             ptrBool(true),
+				},
+			},
+		},
 	}
 
 	return &batchv1.Job{
@@ -191,7 +206,16 @@ echo "==> stagingUrl=$STAGING_URL cluster=$CLUSTER_ID bucket=$RESULT_STORE_BUCKE
 WORK=/tmp/work
 mkdir -p "$WORK" && cd "$WORK"
 
-REPO_URL="https://github.com/mikelear/${SERVICE}.git"
+# Most service repos are PRIVATE; embed the GitHub token in the clone
+# URL when available. Fall back to anonymous for public repos like
+# leartech-qa-canary. Without auth, private-repo clones get HTTP 401
+# which git reports as "branch not found" — masks the real failure.
+if [ -n "${GIT_TOKEN:-}" ]; then
+  REPO_URL="https://x-access-token:${GIT_TOKEN}@github.com/mikelear/${SERVICE}.git"
+else
+  REPO_URL="https://github.com/mikelear/${SERVICE}.git"
+  echo "::WARN GIT_TOKEN not set; private-repo clones will fail with 401"
+fi
 
 # Per-service git tag schemes vary: most services tag as v<version>; the
 # JX-release multi-cluster pattern tags as v<version>-<cluster> (canary).
