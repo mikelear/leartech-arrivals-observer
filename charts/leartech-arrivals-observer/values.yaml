@@ -156,3 +156,26 @@ forensics:
   runnerImage: us-central1-docker.pkg.dev/product-first/oci/leartech-forensics-runner:0.0.1
   tempoBaseUrl: http://tempo.jx-observability:3200
   windowMinutes: 5
+
+
+# tekton-git ExternalSecret — synced from cluster secret backend so the
+# dispatched test-runner Job can clone PRIVATE service repos. Default
+# create:true. On clusters where another chart owns this secret already
+# (e.g. leartech-ai-classifier on gsm), set create:false in the per-
+# cluster override to avoid conflict.
+tektonGit:
+  create: true
+
+# Backend toggle for ExternalSecrets — same pattern as ai-classifier /
+# auth-service / automated-agent. Per-cluster overlay enables the right
+# backend (gcp on gsm, azure on akv).
+externalSecrets:
+  gcp:
+    enabled: false
+    # projectId: product-first  # default
+    # tektonGitKey: tf-jx-usable-bird-jx-pipeline-user  # default
+  azure:
+    enabled: false
+    # vaultMountPoint: kubernetes  # default
+    # vaultRole: jx-vault  # default
+    # tektonGitKey: secret/data/jx/pipelineUser  # default
