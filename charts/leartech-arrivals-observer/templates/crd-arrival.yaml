@@ -100,6 +100,23 @@ spec:
               newlyFailed:
                 type: array
                 items: { type: string }
+              # Tempo span-diff forensics. Populated by leartech-forensics-
+              # runner Job, dispatched by the controller when an Arrival
+              # reaches phase=Failed. Best-effort — the field stays empty
+              # if forensics is disabled or the runner couldn't reach Tempo.
+              forensics:
+                type: object
+                properties:
+                  diffUrl: { type: string, description: "gs:// URL of the full diff.json" }
+                  generatedAt: { type: string, format: date-time }
+                  jobName: { type: string }
+                  summary:
+                    type: object
+                    properties:
+                      missing: { type: integer, description: "Endpoints in before-window absent in after-window" }
+                      new: { type: integer, description: "Endpoints in after-window absent in before-window" }
+                      latency_regressions: { type: integer, description: "Endpoints with p95_after/p95_before > threshold" }
+                      error_rate_regressions: { type: integer, description: "Endpoints with err_rate_delta > threshold" }
     additionalPrinterColumns:
     - name: Service
       type: string

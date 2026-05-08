@@ -30,6 +30,7 @@ import (
 	"github.com/mikelear/leartech-arrivals-observer/internal/config"
 	"github.com/mikelear/leartech-arrivals-observer/internal/controller"
 	"github.com/mikelear/leartech-arrivals-observer/internal/dispatch"
+	"github.com/mikelear/leartech-arrivals-observer/internal/forensics"
 	"github.com/mikelear/leartech-arrivals-observer/internal/handlers"
 	"github.com/mikelear/leartech-arrivals-observer/internal/middleware"
 	"github.com/mikelear/leartech-arrivals-observer/internal/tracing"
@@ -121,6 +122,24 @@ func run() error {
 		log.Warn().Msg("dispatch.runnerImage empty → controller in stub mode (no real Jobs)")
 	}
 
+	// Forensics dispatcher — fire-and-forget Job on terminal Failed.
+	// nil disables; controller logs a warning and skips.
+	var forensicsDispatcher *forensics.Dispatcher
+	if cfg.ForensicsEnabled && cfg.ForensicsRunnerImage != "" {
+		forensicsDispatcher = forensics.New(forensics.Config{
+			Enabled:           cfg.ForensicsEnabled,
+			RunnerImage:       cfg.ForensicsRunnerImage,
+			TempoBaseURL:      cfg.ForensicsTempoBaseURL,
+			WindowMinutes:     cfg.ForensicsWindowMinutes,
+			GCSKeySecret:      cfg.DispatchGCSKeySecret,
+			ResultStoreBucket: cfg.DispatchResultStoreBucket,
+			ClusterID:         cfg.ClusterID,
+		}, kubeClient)
+		log.Info().Str("image", cfg.ForensicsRunnerImage).Msg("forensics dispatcher enabled")
+	} else {
+		log.Info().Bool("enabled", cfg.ForensicsEnabled).Str("image", cfg.ForensicsRunnerImage).Msg("forensics disabled")
+	}
+
 	// Start the Arrival lifecycle controller.
 	ctrl, err := controller.New(ctx, controller.Config{
 		Namespace:      cfg.WatchNamespace,
@@ -128,6 +147,7 @@ func run() error {
 		PollInterval:   cfg.DispatchPollInterval(),
 		Timeout:        cfg.DispatchTimeout(),
 		Dispatcher:     dispatcher,
+		Forensics:      forensicsDispatcher,
 	})
 	if err != nil {
 		return fmt.Errorf("init controller: %w", err)

@@ -50,6 +50,12 @@ type Config struct {
 	DispatchRunnerImage         string `envconfig:"DISPATCH_RUNNER_IMAGE"`
 	DispatchResultStoreBucket   string `envconfig:"DISPATCH_RESULT_STORE_BUCKET"`
 	DispatchGCSKeySecret        string `envconfig:"DISPATCH_GCS_KEY_SECRET" default:"test-artifacts-gcs-key"`
+
+	// Forensics — span-diff Job dispatched on Arrival.phase=Failed.
+	ForensicsEnabled       bool   `envconfig:"FORENSICS_ENABLED" default:"true"`
+	ForensicsRunnerImage   string `envconfig:"FORENSICS_RUNNER_IMAGE"`
+	ForensicsTempoBaseURL  string `envconfig:"FORENSICS_TEMPO_BASE_URL" default:"http://tempo.jx-observability:3200"`
+	ForensicsWindowMinutes int    `envconfig:"FORENSICS_WINDOW_MINUTES" default:"5"`
 }
 
 // Load reads env and returns a populated Config.

@@ -14,3 +14,7 @@ data:
   DISPATCH_RUNNER_IMAGE: {{ .Values.dispatch.runnerImage | quote }}
   DISPATCH_RESULT_STORE_BUCKET: {{ .Values.dispatch.resultStoreBucket | quote }}
   DISPATCH_GCS_KEY_SECRET: {{ .Values.dispatch.gcsKeySecret | quote }}
+  FORENSICS_ENABLED: {{ .Values.forensics.enabled | quote }}
+  FORENSICS_RUNNER_IMAGE: {{ .Values.forensics.runnerImage | quote }}
+  FORENSICS_TEMPO_BASE_URL: {{ .Values.forensics.tempoBaseUrl | quote }}
+  FORENSICS_WINDOW_MINUTES: {{ .Values.forensics.windowMinutes | quote }}

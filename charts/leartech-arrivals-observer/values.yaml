@@ -142,5 +142,16 @@ dispatch:
   # runner to upload results.json to the result-store bucket. Must exist
   # in the watch namespace; same secret as the pre-merge end2end task.
   gcsKeySecret: test-artifacts-gcs-key
+
+# Tempo span-diff forensics — auto-triggered when an Arrival reaches
+# phase=Failed. The controller fires a fire-and-forget K8s Job using
+# leartech-forensics-runner; the runner queries Tempo for two windows
+# (deployed_at ± windowMinutes), computes endpoint-level diff, uploads
+# to gs://<bucket>/forensics/v1/..., and patches Arrival.status.forensics.
+forensics:
+  enabled: true
+  runnerImage: us-central1-docker.pkg.dev/product-first/oci/leartech-forensics-runner:0.0.1
+  tempoBaseUrl: http://tempo.jx-observability:3200
+  windowMinutes: 5
   # Result-store bucket — same pattern as pre-merge end2end results.
   resultStoreBucket: test-artifacts-product-first

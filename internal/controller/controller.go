@@ -33,6 +33,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/mikelear/leartech-arrivals-observer/internal/dispatch"
+	"github.com/mikelear/leartech-arrivals-observer/internal/forensics"
 )
 
 // Phase enum mirrors the CRD's status.phase enum.
@@ -70,6 +71,10 @@ type Config struct {
 	// (used in unit tests + first-cut deployments before runner image is
 	// available).
 	Dispatcher *dispatch.Dispatcher
+
+	// Forensics is dispatched fire-and-forget when an Arrival reaches a
+	// terminal Failed/Timeout phase. nil disables forensics entirely.
+	Forensics *forensics.Dispatcher
 }
 
 // Controller runs the Arrival lifecycle loop.
@@ -368,6 +373,51 @@ func (c *Controller) handleTesting(ctx context.Context, u *unstructured.Unstruct
 		"finalizedAt": time.Now().UTC().Format(time.RFC3339),
 	})
 	log.Info().Str("arrival", name).Str("phase", phase).Msg("arrival finalized (real dispatch)")
+
+	// Fire-and-forget forensics on terminal Failed (or Timeout). Disabled
+	// when no Forensics dispatcher is configured (Forensics nil) — same
+	// graceful-degrade pattern as the test dispatcher.
+	if (phase == PhaseFailed || phase == PhaseTimeout) && c.cfg.Forensics != nil {
+		c.maybeDispatchForensics(ctx, u)
+	}
+}
+
+// maybeDispatchForensics builds Args from the Arrival spec and creates
+// a forensics Job. Fire-and-forget — errors are logged but don't affect
+// the Arrival's terminal phase.
+func (c *Controller) maybeDispatchForensics(ctx context.Context, u *unstructured.Unstructured) {
+	name := u.GetName()
+	service, _, _ := unstructured.NestedString(u.Object, "spec", "service")
+	version, _, _ := unstructured.NestedString(u.Object, "spec", "version")
+	deployedAt, _, _ := unstructured.NestedString(u.Object, "spec", "deployedAt")
+
+	jobName, err := c.cfg.Forensics.Dispatch(ctx, forensics.Args{
+		ArrivalName:      name,
+		ArrivalNamespace: c.cfg.Namespace,
+		Service:          service,
+		Version:          version,
+		// Phase 1 hardening: walk back through Arrivals (label
+		// selector qa.leartech.com/service=<svc>) and pick the most
+		// recent finalized one before this arrival's CreationTimestamp.
+		// Spike: leave empty; the runner treats empty PreviousVersion
+		// as "first deploy" — diff degrades to a per-endpoint listing
+		// of the new window only, still useful as a baseline snapshot.
+		PreviousVersion: "",
+		DeployedAt:      deployedAt,
+	})
+	if err != nil {
+		log.Warn().Err(err).Str("arrival", name).Msg("forensics dispatch failed (non-fatal)")
+		return
+	}
+	if jobName == "" {
+		return // disabled
+	}
+	// Record jobName on the arrival so kubectl observers can find the Job.
+	c.patchStatus(ctx, name, map[string]any{
+		"forensics": map[string]any{
+			"jobName": jobName,
+		},
+	})
 }
 
 // asString safely extracts a string from an unstructured map field,
