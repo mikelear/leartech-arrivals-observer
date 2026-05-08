@@ -252,39 +252,62 @@ done
 echo "==> staging healthy"
 
 cd "$TEST_PACK"
+TEST_EXIT=0
 case "$TEST_PACK_TYPE" in
   end2end)
     [ -x run.sh ] || { echo "::FATAL no executable run.sh in $TEST_PACK"; exit 1; }
-    PREVIEW_URL="$STAGING_URL" bash run.sh
+    PREVIEW_URL="$STAGING_URL" bash run.sh || TEST_EXIT=$?
     ;;
   end2end-ui)
     npm ci --no-audit --no-fund || npm install --no-audit --no-fund
-    PREVIEW_URL="$STAGING_URL" npx playwright test --reporter=list
+    # Force trace + screenshot + video collection for ALL tests so the
+    # post-deploy artifact set is rich enough to debug from. Pre-merge
+    # presubmits run with default config (lighter); post-deploy runs
+    # are diagnosis-grade.
+    PREVIEW_URL="$STAGING_URL" \
+      PWTEST_BROWSER_TRACE=on \
+      npx playwright test \
+        --reporter=list,html \
+        --trace=on \
+        --screenshot=on \
+        --video=retain-on-failure \
+        || TEST_EXIT=$?
     ;;
   *)
     echo "::FATAL unsupported TEST_PACK_TYPE=$TEST_PACK_TYPE"; exit 1
     ;;
 esac
 
-# Read results.json (test runner contract). Required for end2end; for
-# end2end-ui Playwright a follow-on step would synthesize it from the
-# JUnit reporter — out of scope for 2.7.2b first cut.
-if [ ! -f results.json ]; then
-  echo "::ERROR no results.json produced (test runner contract violation)"
-  exit 1
+# Auth gcloud once for all uploads.
+gcloud auth activate-service-account --key-file="$GOOGLE_APPLICATION_CREDENTIALS" 2>/dev/null || \
+  echo "::WARN gcloud auth failed (key-file missing?); uploads may fail"
+
+# Upload results.json if produced (end2end contract; end2end-ui synthesizes
+# from Playwright HTML report in a future iteration).
+DEST_PREFIX="gs://${RESULT_STORE_BUCKET}/results/v1/post-deploy/${SERVICE}/${VERSION}/${CLUSTER_ID}/${TEST_PACK}"
+if [ -f results.json ]; then
+  echo "==> uploading results.json to ${DEST_PREFIX}/results.json"
+  gsutil cp results.json "${DEST_PREFIX}/results.json" || \
+    echo "::WARN results.json upload failed"
 fi
 
-# Upload to gs://<bucket>/results/v1/post-deploy/<service>/<version>/<cluster>/<pack>/results.json
-DEST="gs://${RESULT_STORE_BUCKET}/results/v1/post-deploy/${SERVICE}/${VERSION}/${CLUSTER_ID}/${TEST_PACK}/results.json"
-echo "==> uploading results to ${DEST}"
-gcloud auth activate-service-account --key-file="$GOOGLE_APPLICATION_CREDENTIALS" 2>/dev/null || \
-  echo "::WARN gcloud auth failed (key-file missing?); upload may fail"
-gsutil cp results.json "$DEST" || {
-  echo "::ERROR gsutil cp failed; result will be Job-status-only"
-  # Don't fail the Job on upload error — the Job's exit code is still
-  # the source of truth. Result-store reader is best-effort.
-}
-echo "==> done"
+# Playwright artifacts — trace.zip + screenshots + videos + HTML report.
+# These are huge wins for diagnosis: a failed test gets a clickable
+# trace.playwright.dev link in the gate's PR comment (terraform CORS
+# allowlist needed; see leartech-hub/shared-rules for setup).
+if [ -d "test-results" ]; then
+  echo "==> uploading Playwright artifacts (test-results/) to ${DEST_PREFIX}/test-results/"
+  gsutil -m cp -r test-results "${DEST_PREFIX}/" 2>&1 | tail -3 || \
+    echo "::WARN test-results upload failed"
+fi
+if [ -d "playwright-report" ]; then
+  echo "==> uploading Playwright HTML report to ${DEST_PREFIX}/playwright-report/"
+  gsutil -m cp -r playwright-report "${DEST_PREFIX}/" 2>&1 | tail -3 || \
+    echo "::WARN playwright-report upload failed"
+fi
+
+echo "==> done; test exit code=${TEST_EXIT}"
+exit $TEST_EXIT
 `
 
 func jobNameFor(arrivalName, pack string) string {
