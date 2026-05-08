@@ -98,6 +98,13 @@ func (d *Dispatcher) buildJob(args Args, jobName string) *batchv1.Job {
 		{Name: "RESULT_STORE_BUCKET", Value: d.cfg.ResultStoreBucket},
 		{Name: "WINDOW_MINUTES", Value: fmt.Sprintf("%d", d.cfg.WindowMinutes)},
 		{Name: "GOOGLE_APPLICATION_CREDENTIALS", Value: "/var/run/secrets/test-artifacts/key.json"},
+		// gcloud writes its config to $HOME/.config/gcloud by default.
+		// Runner pod is non-root (UID 1001) without a writable $HOME, so
+		// gcloud auth fails with "Could not create directory [/.config/
+		// gcloud/configurations]". Override CLOUDSDK_CONFIG to a writable
+		// path; this also keeps gcloud state out of the Job's tmp lifetime.
+		{Name: "CLOUDSDK_CONFIG", Value: "/tmp/gcloud"},
+		{Name: "HOME", Value: "/tmp"},
 	}
 
 	return &batchv1.Job{
