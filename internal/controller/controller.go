@@ -391,19 +391,18 @@ func (c *Controller) maybeDispatchForensics(ctx context.Context, u *unstructured
 	version, _, _ := unstructured.NestedString(u.Object, "spec", "version")
 	deployedAt, _, _ := unstructured.NestedString(u.Object, "spec", "deployedAt")
 
+	prev := c.findPreviousVersion(ctx, service, version, u.GetCreationTimestamp().Time)
+	if prev != "" {
+		log.Info().Str("arrival", name).Str("previousVersion", prev).Msg("forensics will compare against previous deployment")
+	}
+
 	jobName, err := c.cfg.Forensics.Dispatch(ctx, forensics.Args{
 		ArrivalName:      name,
 		ArrivalNamespace: c.cfg.Namespace,
 		Service:          service,
 		Version:          version,
-		// Phase 1 hardening: walk back through Arrivals (label
-		// selector qa.leartech.com/service=<svc>) and pick the most
-		// recent finalized one before this arrival's CreationTimestamp.
-		// Spike: leave empty; the runner treats empty PreviousVersion
-		// as "first deploy" — diff degrades to a per-endpoint listing
-		// of the new window only, still useful as a baseline snapshot.
-		PreviousVersion: "",
-		DeployedAt:      deployedAt,
+		PreviousVersion:  prev,
+		DeployedAt:       deployedAt,
 	})
 	if err != nil {
 		log.Warn().Err(err).Str("arrival", name).Msg("forensics dispatch failed (non-fatal)")
@@ -427,6 +426,64 @@ func asString(v any) string {
 		return s
 	}
 	return ""
+}
+
+// findPreviousVersion walks back through Arrivals matching service to
+// find the most recent finalized one (Passed, Failed, Timeout — NOT
+// Skipped, since those reflect "no testPacks" not real previous-deploy
+// signal) before the given currentArrival's creation time. Returns its
+// spec.version, or empty string if no prior deployment found (treated by
+// the forensics runner as "first deploy" → single-window snapshot).
+//
+// Best-effort: errors are logged but never block the dispatch path. The
+// label selector + status.finalizedAt filter is fast — there are
+// typically <50 Arrivals per service in jx-staging.
+func (c *Controller) findPreviousVersion(ctx context.Context, service, currentVersion string, currentCreated time.Time) string {
+	if service == "" {
+		return ""
+	}
+	selector := fmt.Sprintf("qa.leartech.com/service=%s", service)
+	list, err := c.dynamic.Resource(arrivalGVR).
+		Namespace(c.cfg.Namespace).
+		List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		log.Debug().Err(err).Str("service", service).Msg("findPreviousVersion: list failed")
+		return ""
+	}
+	var (
+		bestVer   string
+		bestFinal time.Time
+	)
+	for _, item := range list.Items {
+		ver, _, _ := unstructured.NestedString(item.Object, "spec", "version")
+		if ver == "" || ver == currentVersion {
+			continue
+		}
+		// Skip current Arrival's own ancestors (same name) — created at
+		// or after the current one. Use creationTimestamp ordering.
+		if !item.GetCreationTimestamp().Time.Before(currentCreated) {
+			continue
+		}
+		// Prefer arrivals that reached a real terminal phase. Skipped
+		// arrivals don't represent actual test runs against the version.
+		phase, _, _ := unstructured.NestedString(item.Object, "status", "phase")
+		if phase != PhasePassed && phase != PhaseFailed && phase != PhaseTimeout {
+			continue
+		}
+		fAt, _, _ := unstructured.NestedString(item.Object, "status", "finalizedAt")
+		if fAt == "" {
+			continue
+		}
+		ft, err := time.Parse(time.RFC3339, fAt)
+		if err != nil {
+			continue
+		}
+		if ft.After(bestFinal) {
+			bestFinal = ft
+			bestVer = ver
+		}
+	}
+	return bestVer
 }
 
 // finalize transitions an arrival to a terminal phase, marking each test
