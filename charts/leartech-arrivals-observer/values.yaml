@@ -153,7 +153,7 @@ dispatch:
 # to gs://<bucket>/forensics/v1/..., and patches Arrival.status.forensics.
 forensics:
   enabled: true
-  runnerImage: us-central1-docker.pkg.dev/product-first/oci/leartech-forensics-runner:0.0.1
+  runnerImage: us-central1-docker.pkg.dev/product-first/oci/leartech-forensics-runner:0.0.2
   tempoBaseUrl: http://tempo.jx-observability:3200
   windowMinutes: 5
 
