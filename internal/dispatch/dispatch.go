@@ -34,10 +34,10 @@ import (
 // Config controls dispatch behaviour. Fields populated from chart values
 // via the observer's ConfigMap (see internal/config/config.go).
 type Config struct {
-	RunnerImage       string
-	ResultStoreBucket string
-	GCSKeySecret      string
-	ClusterID         string
+	RunnerImage           string
+	ResultStoreBucket     string
+	GCSKeySecret          string
+	ClusterID             string
 	ActiveDeadlineSeconds int64
 
 	// Repo discovery
@@ -452,6 +452,8 @@ func ptrBool(v bool) *bool    { return &v }
 // JobStatus summarises a Job's phase for the controller.
 type JobStatus int
 
+// JobStatus enum values. JobUnknown covers both NotFound and "no terminal
+// signal yet" — controller treats it as "keep polling".
 const (
 	JobUnknown JobStatus = iota
 	JobRunning
