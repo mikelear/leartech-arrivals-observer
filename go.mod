@@ -2,6 +2,8 @@ module github.com/mikelear/leartech-arrivals-observer
 
 go 1.26.0
 
+toolchain go1.26.3
+
 require (
 	github.com/gin-gonic/gin v1.12.0
 	github.com/jackc/pgx/v5 v5.7.1

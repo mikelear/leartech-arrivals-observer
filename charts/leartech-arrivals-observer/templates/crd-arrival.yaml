@@ -4,6 +4,13 @@
 # config-root/customresourcedefinitions/jx-staging/leartech-arrivals-observer/
 # automatically — applied cluster-wide before any namespaced resource.
 #
+# CRDs are cluster-scoped, which collides when two Helm releases of the
+# same chart try to install them (e.g. the canonical `leartech-arrivals-
+# observer` release in jx-staging vs a per-PR `preview` release in a
+# preview namespace — Helm refuses to import the existing CRD into the
+# new release). Gate the install on .Values.crd.install so preview deploys
+# can reuse the cluster's existing CRD without claiming Helm ownership.
+#
 # Schema decisions:
 #   - Namespaced (one Arrival per ReplicaSet event in jx-staging; same
 #     service+version in different namespaces = separate Arrivals)
@@ -11,6 +18,7 @@
 #     write permission)
 #   - additionalPrinterColumns for kubectl-readability without -o yaml
 #   - x-kubernetes-preserve-unknown-fields on status while v1alpha1 (forgiving)
+{{- if .Values.crd.install }}
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
@@ -134,3 +142,5 @@ spec:
     - name: Age
       type: date
       jsonPath: .metadata.creationTimestamp
+
+{{- end }}

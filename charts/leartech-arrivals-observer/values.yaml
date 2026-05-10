@@ -43,6 +43,14 @@ jxRequirements:
 
 knativeDeploy: false
 
+# CRD install — cluster-scoped Arrival CRD. true on the canonical install
+# (jx-staging release), false on per-PR preview deploys (the cluster
+# already has the CRD installed by the canonical release; previewing a
+# second copy errors out on Helm ownership). See templates/crd-arrival.yaml
+# for the full ownership-conflict explanation.
+crd:
+  install: true
+
 # Runtime config that ends up in the ConfigMap + mounted / env-injected.
 # Override per env via configs/<env>.yaml or preview helmfile set: block.
 config:
