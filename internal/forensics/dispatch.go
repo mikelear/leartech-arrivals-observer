@@ -11,9 +11,11 @@
 package forensics
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"strings"
+	"text/template"
 
 	"github.com/rs/zerolog/log"
 	batchv1 "k8s.io/api/batch/v1"
@@ -35,6 +37,18 @@ type Config struct {
 	GCSKeySecret      string
 	ResultStoreBucket string
 	ClusterID         string
+
+	// ForensicsPathTemplate — Go text/template, substituted with
+	// .Cluster .Namespace .Service .Version. Result passed to runner
+	// as FORENSICS_PATH_PREFIX env. Mirrors the post-deploy contract.
+	ForensicsPathTemplate string
+
+	// Diff thresholds — env-overridable, default-tuned.
+	LatencyRatio   float64
+	ErrorRateDelta float64
+
+	// Wall-clock cap for the runner's Tempo query / diff phase.
+	ContextTimeoutMinutes int
 }
 
 // Args bundles the per-Arrival fields needed to render a forensics Job.
@@ -86,6 +100,21 @@ func (d *Dispatcher) buildJob(args Args, jobName string) *batchv1.Job {
 	const backoff int32 = 0
 	deadline := int64(15 * 60) // 15min wall-clock — Tempo queries should be fast
 
+	// Render forensics path prefix once. Empty template ⇒ empty string;
+	// the runner falls back to its built-in default for backward compat.
+	prefix, err := renderTemplate(d.cfg.ForensicsPathTemplate, struct {
+		Cluster, Namespace, Service, Version string
+	}{
+		Cluster:   d.cfg.ClusterID,
+		Namespace: args.ArrivalNamespace,
+		Service:   args.Service,
+		Version:   args.Version,
+	})
+	if err != nil {
+		log.Warn().Err(err).Msg("forensics path template render failed; runner will use default")
+		prefix = ""
+	}
+
 	envVars := []corev1.EnvVar{
 		{Name: "SERVICE", Value: args.Service},
 		{Name: "VERSION", Value: args.Version},
@@ -96,7 +125,11 @@ func (d *Dispatcher) buildJob(args Args, jobName string) *batchv1.Job {
 		{Name: "ARRIVAL_NAMESPACE", Value: args.ArrivalNamespace},
 		{Name: "TEMPO_BASE_URL", Value: d.cfg.TempoBaseURL},
 		{Name: "RESULT_STORE_BUCKET", Value: d.cfg.ResultStoreBucket},
+		{Name: "RESULT_STORE_PATH_PREFIX", Value: prefix},
 		{Name: "WINDOW_MINUTES", Value: fmt.Sprintf("%d", d.cfg.WindowMinutes)},
+		{Name: "LATENCY_RATIO", Value: fmt.Sprintf("%g", d.cfg.LatencyRatio)},
+		{Name: "ERROR_RATE_DELTA", Value: fmt.Sprintf("%g", d.cfg.ErrorRateDelta)},
+		{Name: "CONTEXT_TIMEOUT_MINUTES", Value: fmt.Sprintf("%d", d.cfg.ContextTimeoutMinutes)},
 		{Name: "GOOGLE_APPLICATION_CREDENTIALS", Value: "/var/run/secrets/test-artifacts/key.json"},
 		// gcloud writes its config to $HOME/.config/gcloud by default.
 		// Runner pod is non-root (UID 1001) without a writable $HOME, so
@@ -164,6 +197,23 @@ func (d *Dispatcher) buildJob(args Args, jobName string) *batchv1.Job {
 			},
 		},
 	}
+}
+
+// renderTemplate runs a Go text/template against the given data.
+// Empty input ⇒ empty output (no error).
+func renderTemplate(tmpl string, data any) (string, error) {
+	if tmpl == "" {
+		return "", nil
+	}
+	t, err := template.New("").Option("missingkey=error").Parse(tmpl)
+	if err != nil {
+		return "", err
+	}
+	var buf bytes.Buffer
+	if err := t.Execute(&buf, data); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
 }
 
 func jobNameFor(arrivalName string) string {

@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -110,12 +111,28 @@ func run() error {
 	// back to stub finalize.
 	var dispatcher *dispatch.Dispatcher
 	if cfg.DispatchRunnerImage != "" {
+		resources, err := dispatch.ParseResources(cfg.DispatchResourcesJSON)
+		if err != nil {
+			return fmt.Errorf("parse dispatch resources: %w", err)
+		}
 		dispatcher = dispatch.New(dispatch.Config{
-			RunnerImage:           cfg.DispatchRunnerImage,
-			ResultStoreBucket:     cfg.DispatchResultStoreBucket,
-			GCSKeySecret:          cfg.DispatchGCSKeySecret,
-			ClusterID:             cfg.ClusterID,
-			ActiveDeadlineSeconds: int64(cfg.DispatchTimeout().Seconds()),
+			RunnerImage:            cfg.DispatchRunnerImage,
+			ResultStoreBucket:      cfg.DispatchResultStoreBucket,
+			GCSKeySecret:           cfg.DispatchGCSKeySecret,
+			ClusterID:              cfg.ClusterID,
+			ActiveDeadlineSeconds:  int64(cfg.DispatchTimeout().Seconds()),
+			RepoHost:               cfg.DispatchRepoHost,
+			RepoOrg:                cfg.DispatchRepoOrg,
+			RefFallbackTemplates:   strings.Split(cfg.DispatchRefFallbacksRaw, "|"),
+			HealthEndpoint:         cfg.DispatchHealthEndpoint,
+			HealthTimeoutSeconds:   cfg.DispatchHealthTimeoutSeconds,
+			HealthCurlSeconds:      cfg.DispatchHealthCurlSeconds,
+			HealthPollSeconds:      cfg.DispatchHealthPollSeconds,
+			HealthSuccessThreshold: cfg.DispatchHealthSuccessThreshold,
+			Resources:              resources,
+			GitSecretName:          cfg.DispatchGitSecretName,
+			GitSecretKey:           cfg.DispatchGitSecretKey,
+			PostDeployPathTemplate: cfg.PathsPostDeployTemplate,
 		}, kubeClient)
 		log.Info().Str("image", cfg.DispatchRunnerImage).Msg("dispatcher enabled")
 	} else {
@@ -127,13 +144,17 @@ func run() error {
 	var forensicsDispatcher *forensics.Dispatcher
 	if cfg.ForensicsEnabled && cfg.ForensicsRunnerImage != "" {
 		forensicsDispatcher = forensics.New(forensics.Config{
-			Enabled:           cfg.ForensicsEnabled,
-			RunnerImage:       cfg.ForensicsRunnerImage,
-			TempoBaseURL:      cfg.ForensicsTempoBaseURL,
-			WindowMinutes:     cfg.ForensicsWindowMinutes,
-			GCSKeySecret:      cfg.DispatchGCSKeySecret,
-			ResultStoreBucket: cfg.DispatchResultStoreBucket,
-			ClusterID:         cfg.ClusterID,
+			Enabled:               cfg.ForensicsEnabled,
+			RunnerImage:           cfg.ForensicsRunnerImage,
+			TempoBaseURL:          cfg.ForensicsTempoBaseURL,
+			WindowMinutes:         cfg.ForensicsWindowMinutes,
+			GCSKeySecret:          cfg.DispatchGCSKeySecret,
+			ResultStoreBucket:     cfg.DispatchResultStoreBucket,
+			ClusterID:             cfg.ClusterID,
+			ForensicsPathTemplate: cfg.PathsForensicsTemplate,
+			LatencyRatio:          cfg.ForensicsLatencyRatio,
+			ErrorRateDelta:        cfg.ForensicsErrorRateDelta,
+			ContextTimeoutMinutes: cfg.ForensicsContextTimeoutMinutes,
 		}, kubeClient)
 		log.Info().Str("image", cfg.ForensicsRunnerImage).Msg("forensics dispatcher enabled")
 	} else {

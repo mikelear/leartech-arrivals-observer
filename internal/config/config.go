@@ -51,11 +51,43 @@ type Config struct {
 	DispatchResultStoreBucket   string `envconfig:"DISPATCH_RESULT_STORE_BUCKET"`
 	DispatchGCSKeySecret        string `envconfig:"DISPATCH_GCS_KEY_SECRET" default:"test-artifacts-gcs-key"`
 
+	// Repo discovery for the runner clone step.
+	DispatchRepoHost string `envconfig:"DISPATCH_REPO_HOST" default:"github.com"`
+	DispatchRepoOrg  string `envconfig:"DISPATCH_REPO_ORG" default:"mikelear"`
+	// DispatchRefFallbacksRaw is the |-delimited list of refspec
+	// fallback templates. Each template is rendered with .Version + .Cluster
+	// when a Job is built. See dispatch.RenderRefFallbacks.
+	DispatchRefFallbacksRaw string `envconfig:"DISPATCH_REF_FALLBACKS" default:"v{{.Version}}-{{.Cluster}}|v{{.Version}}|{{.Version}}|main"`
+
+	// Health-probe params — passed straight through to the runner Job env.
+	DispatchHealthEndpoint         string `envconfig:"DISPATCH_HEALTH_ENDPOINT" default:"/health/live"`
+	DispatchHealthTimeoutSeconds   int    `envconfig:"DISPATCH_HEALTH_TIMEOUT_SECONDS" default:"600"`
+	DispatchHealthCurlSeconds      int    `envconfig:"DISPATCH_HEALTH_CURL_SECONDS" default:"5"`
+	DispatchHealthPollSeconds      int    `envconfig:"DISPATCH_HEALTH_POLL_SECONDS" default:"5"`
+	DispatchHealthSuccessThreshold int    `envconfig:"DISPATCH_HEALTH_SUCCESS_THRESHOLD" default:"3"`
+
+	// Per-Job resources, JSON-encoded corev1.ResourceRequirements.
+	// {requests:{cpu,memory},limits:{cpu,memory}}.
+	DispatchResourcesJSON string `envconfig:"DISPATCH_RESOURCES_JSON" default:"{}"`
+
+	// GitHub auth — SecretKeyRef the dispatched Job uses to clone private repos.
+	DispatchGitSecretName string `envconfig:"DISPATCH_GIT_SECRET_NAME" default:"tekton-git"`
+	DispatchGitSecretKey  string `envconfig:"DISPATCH_GIT_SECRET_KEY" default:"password"`
+
+	// Path templates — CONTRACT with leartech-gate's reader. Substituted
+	// at controller-side via Go text/template (.Cluster .Namespace
+	// .Service .Version .Pack); pre-rendered prefix passed to Job env.
+	PathsPostDeployTemplate string `envconfig:"PATHS_POST_DEPLOY_TEMPLATE" default:"results/v1/post-deploy/{{.Cluster}}/{{.Namespace}}/{{.Service}}/{{.Version}}/{{.Pack}}"`
+	PathsForensicsTemplate  string `envconfig:"PATHS_FORENSICS_TEMPLATE" default:"forensics/v1/{{.Cluster}}/{{.Namespace}}/{{.Service}}/{{.Version}}"`
+
 	// Forensics — span-diff Job dispatched on Arrival.phase=Failed.
-	ForensicsEnabled       bool   `envconfig:"FORENSICS_ENABLED" default:"true"`
-	ForensicsRunnerImage   string `envconfig:"FORENSICS_RUNNER_IMAGE"`
-	ForensicsTempoBaseURL  string `envconfig:"FORENSICS_TEMPO_BASE_URL" default:"http://tempo.jx-observability:3200"`
-	ForensicsWindowMinutes int    `envconfig:"FORENSICS_WINDOW_MINUTES" default:"5"`
+	ForensicsEnabled               bool    `envconfig:"FORENSICS_ENABLED" default:"true"`
+	ForensicsRunnerImage           string  `envconfig:"FORENSICS_RUNNER_IMAGE"`
+	ForensicsTempoBaseURL          string  `envconfig:"FORENSICS_TEMPO_BASE_URL" default:"http://tempo.jx-observability:3200"`
+	ForensicsWindowMinutes         int     `envconfig:"FORENSICS_WINDOW_MINUTES" default:"5"`
+	ForensicsLatencyRatio          float64 `envconfig:"FORENSICS_LATENCY_RATIO" default:"1.5"`
+	ForensicsErrorRateDelta        float64 `envconfig:"FORENSICS_ERROR_RATE_DELTA" default:"0.05"`
+	ForensicsContextTimeoutMinutes int     `envconfig:"FORENSICS_CONTEXT_TIMEOUT_MINUTES" default:"5"`
 }
 
 // Load reads env and returns a populated Config.
