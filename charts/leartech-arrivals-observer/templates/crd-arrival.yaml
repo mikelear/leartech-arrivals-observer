@@ -78,6 +78,18 @@ spec:
                     type:
                       type: string
                       enum: [end2end, end2end-ui, contract, unit, load]
+              env:
+                type: array
+                description: "Per-service env vars injected into the dispatched test Job (corev1.EnvVar shape). Set from chart values.services[<name>].env. Used to thread per-cluster config (HYDRA_ADMIN_URL, USER_EMAIL/PASSWORD from k8s Secret) into test specs without rebuilding the runner image."
+                # Schema-tolerant — preserve-unknown-fields lets chart values use any
+                # corev1.EnvVar field (including future additions like fieldRef,
+                # configMapKeyRef) without parallel CRD maintenance.
+                x-kubernetes-preserve-unknown-fields: true
+                items:
+                  type: object
+                  required: [name]
+                  properties:
+                    name: { type: string }
           status:
             type: object
             x-kubernetes-preserve-unknown-fields: true

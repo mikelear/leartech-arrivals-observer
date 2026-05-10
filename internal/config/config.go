@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/kelseyhightower/envconfig"
+	corev1 "k8s.io/api/core/v1"
 )
 
 // TestPack is one entry in services[<name>].testPacks — name + type pair
@@ -19,9 +20,17 @@ type TestPack struct {
 
 // ServiceConfig is the per-service dispatch configuration that the watcher
 // embeds into Arrival.spec at ReplicaSet event time.
+//
+// Env injects per-service env vars into the dispatched Job — same shape
+// as corev1.EnvVar so chart values can use either literal {name,value}
+// or secret-backed {name, valueFrom: {secretKeyRef: ...}}. Used to
+// thread per-cluster config into test specs (e.g. HYDRA_ADMIN_URL,
+// USER_EMAIL/PASSWORD from a k8s Secret) without rebuilding the test
+// runner image. Tests read via process.env.<NAME>.
 type ServiceConfig struct {
-	StagingURL string     `json:"stagingUrl"`
-	TestPacks  []TestPack `json:"testPacks"`
+	StagingURL string          `json:"stagingUrl"`
+	TestPacks  []TestPack      `json:"testPacks"`
+	Env        []corev1.EnvVar `json:"env,omitempty"`
 }
 
 // Config is the envconfig-populated runtime configuration.
