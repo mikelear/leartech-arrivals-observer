@@ -78,6 +78,12 @@ type Args struct {
 	Service     string
 	Version     string
 	StagingURL  string
+
+	// Env carries per-service env injection from chart values
+	// (services.<name>.env), threaded via the Arrival CR spec.env.
+	// Appended to the Job's env after the standard set; literal
+	// values + secretKeyRef both supported (corev1.EnvVar shape).
+	Env []corev1.EnvVar
 }
 
 // Dispatcher creates Jobs.
@@ -164,7 +170,7 @@ func (d *Dispatcher) buildJob(args Args, t Test, jobName string) (*batchv1.Job, 
 		return nil, fmt.Errorf("render refFallbacks: %w", err)
 	}
 
-	envVars := []corev1.EnvVar{
+	standardEnv := []corev1.EnvVar{
 		{Name: "STAGING_URL", Value: args.StagingURL},
 		{Name: "SERVICE", Value: args.Service},
 		{Name: "VERSION", Value: args.Version},
@@ -195,6 +201,13 @@ func (d *Dispatcher) buildJob(args Args, t Test, jobName string) (*batchv1.Job, 
 			},
 		},
 	}
+	envVars := make([]corev1.EnvVar, 0, len(standardEnv)+len(args.Env))
+	envVars = append(envVars, standardEnv...)
+	// Append per-service env (HYDRA_ADMIN_URL, USER_EMAIL, etc.) so
+	// test specs can read them via process.env.X. Append AFTER the
+	// standard set so per-service overrides effectively layer on top
+	// (last value wins for duplicates per K8s semantics).
+	envVars = append(envVars, args.Env...)
 
 	resources := d.cfg.Resources
 	if len(resources.Requests) == 0 && len(resources.Limits) == 0 {

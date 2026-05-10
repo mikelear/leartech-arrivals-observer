@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -199,6 +200,7 @@ func (c *Controller) handlePending(ctx context.Context, u *unstructured.Unstruct
 	stagingURL, _, _ := unstructured.NestedString(u.Object, "spec", "stagingUrl")
 	service, _, _ := unstructured.NestedString(u.Object, "spec", "service")
 	version, _, _ := unstructured.NestedString(u.Object, "spec", "version")
+	envSpec, _, _ := unstructured.NestedSlice(u.Object, "spec", "env")
 
 	if len(packs) == 0 {
 		log.Info().Str("arrival", name).Msg("no test packs configured → Skipped")
@@ -222,6 +224,12 @@ func (c *Controller) handlePending(ctx context.Context, u *unstructured.Unstruct
 		})
 	}
 
+	// Decode per-service env injection from spec.env (corev1.EnvVar
+	// shape preserved through unstructured by encode-then-decode).
+	// Failures here are logged + dropped — don't block dispatch on a
+	// malformed env entry; tests may still pass with defaults.
+	env := decodeEnvVars(envSpec)
+
 	// Dispatch Jobs (or stub-finalize if no dispatcher configured).
 	var jobNames map[string]string
 	if c.cfg.Dispatcher != nil {
@@ -232,6 +240,7 @@ func (c *Controller) handlePending(ctx context.Context, u *unstructured.Unstruct
 			Service:     service,
 			Version:     version,
 			StagingURL:  stagingURL,
+			Env:         env,
 		}, tests)
 		if err != nil {
 			log.Error().Err(err).Str("arrival", name).Msg("dispatch failed; arrival → Failed")
@@ -417,6 +426,29 @@ func (c *Controller) maybeDispatchForensics(ctx context.Context, u *unstructured
 			"jobName": jobName,
 		},
 	})
+}
+
+// decodeEnvVars converts an unstructured-shaped env slice (from CR
+// spec.env) back into typed []corev1.EnvVar. Round-trips via JSON
+// because that's the only reliable way to thread the optional
+// valueFrom.secretKeyRef shape through unstructured.NestedSlice.
+// Returns nil on any decode error — caller continues without
+// per-service env injection rather than blocking the dispatch.
+func decodeEnvVars(raw []any) []corev1.EnvVar {
+	if len(raw) == 0 {
+		return nil
+	}
+	bytes, err := json.Marshal(raw)
+	if err != nil {
+		log.Warn().Err(err).Msg("encode spec.env for re-decode")
+		return nil
+	}
+	var out []corev1.EnvVar
+	if err := json.Unmarshal(bytes, &out); err != nil {
+		log.Warn().Err(err).Msg("decode spec.env into []corev1.EnvVar")
+		return nil
+	}
+	return out
 }
 
 // asString safely extracts a string from an unstructured map field,

@@ -23,6 +23,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -240,6 +241,19 @@ func (w *Watcher) upsertArrival(ctx context.Context, rs *appsv1.ReplicaSet, arri
 			return err
 		}
 	}
+	// Per-service env injection — corev1.EnvVar shape preserved so
+	// {name, valueFrom: {secretKeyRef: ...}} flows through unchanged.
+	// Marshal-then-unmarshal via JSON is the standard way to drop a
+	// typed value into an unstructured map.
+	if hasCfg && len(svcCfg.Env) > 0 {
+		envSlice, err := envVarsToSlice(svcCfg.Env)
+		if err != nil {
+			return fmt.Errorf("encode env: %w", err)
+		}
+		if err := unstructured.SetNestedSlice(cr.Object, envSlice, "spec", "env"); err != nil {
+			return err
+		}
+	}
 
 	_, err := w.clients.dynamic.Resource(arrivalGVR).
 		Namespace(w.cfg.Namespace).
@@ -268,6 +282,13 @@ func (w *Watcher) upsertArrival(ctx context.Context, rs *appsv1.ReplicaSet, arri
 		}
 		patchObj["spec"].(map[string]any)["testPacks"] = packs
 	}
+	if hasCfg && len(svcCfg.Env) > 0 {
+		envSlice, err := envVarsToSlice(svcCfg.Env)
+		if err != nil {
+			return fmt.Errorf("encode env (patch): %w", err)
+		}
+		patchObj["spec"].(map[string]any)["env"] = envSlice
+	}
 	patch, err := json.Marshal(patchObj)
 	if err != nil {
 		return fmt.Errorf("marshal patch: %w", err)
@@ -276,6 +297,25 @@ func (w *Watcher) upsertArrival(ctx context.Context, rs *appsv1.ReplicaSet, arri
 		Namespace(w.cfg.Namespace).
 		Patch(ctx, arrivalName, types.MergePatchType, patch, metav1.PatchOptions{})
 	return err
+}
+
+// envVarsToSlice round-trips []corev1.EnvVar through JSON to a
+// []any usable by unstructured.SetNestedSlice. Preserves the full
+// EnvVar shape — both literal {name, value} and {name, valueFrom:
+// {secretKeyRef: …}} variants.
+func envVarsToSlice(envs []corev1.EnvVar) ([]any, error) {
+	if len(envs) == 0 {
+		return nil, nil
+	}
+	raw, err := json.Marshal(envs)
+	if err != nil {
+		return nil, err
+	}
+	var out []any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // arrivalNameFor produces a deterministic Arrival CR name. Underscores +
