@@ -46,3 +46,55 @@ func TestLoadOverrides(t *testing.T) {
 		t.Errorf("WatchNamespace = %q, want jx-preproduction", cfg.WatchNamespace)
 	}
 }
+
+func TestLoadServices_EmptyJSON(t *testing.T) {
+	c := &Config{ServicesJSON: ""}
+	m, err := c.LoadServices()
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if len(m) != 0 {
+		t.Errorf("expected empty map, got %v", m)
+	}
+}
+
+func TestLoadServices_ValidJSON(t *testing.T) {
+	c := &Config{
+		ServicesJSON: `{"foo":{"stagingUrl":"https://foo.example","testPacks":[{"name":"smoke","type":"end2end"}]}}`,
+	}
+	m, err := c.LoadServices()
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if len(m) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(m))
+	}
+	if m["foo"].StagingURL != "https://foo.example" {
+		t.Errorf("stagingUrl = %q", m["foo"].StagingURL)
+	}
+	if len(m["foo"].TestPacks) != 1 || m["foo"].TestPacks[0].Name != "smoke" {
+		t.Errorf("testPacks = %+v", m["foo"].TestPacks)
+	}
+}
+
+func TestLoadServices_InvalidJSONErrors(t *testing.T) {
+	c := &Config{ServicesJSON: "not json"}
+	_, err := c.LoadServices()
+	if err == nil {
+		t.Error("expected error on invalid JSON, got nil")
+	}
+}
+
+func TestDispatchTimeout(t *testing.T) {
+	c := &Config{DispatchTimeoutMinutes: 30}
+	if c.DispatchTimeout().Minutes() != 30 {
+		t.Errorf("DispatchTimeout = %v, want 30m", c.DispatchTimeout())
+	}
+}
+
+func TestDispatchPollInterval(t *testing.T) {
+	c := &Config{DispatchPollIntervalSeconds: 45}
+	if c.DispatchPollInterval().Seconds() != 45 {
+		t.Errorf("DispatchPollInterval = %v, want 45s", c.DispatchPollInterval())
+	}
+}
