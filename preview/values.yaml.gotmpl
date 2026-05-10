@@ -4,6 +4,13 @@ image:
 
 replicaCount: 1
 
+# Skip CRD install in preview — the cluster's canonical release in
+# jx-staging already installed the cluster-scoped Arrival CRD; helm
+# can't re-import it into the preview release without ownership
+# conflict. Preview reuses the cluster's existing CRD.
+crd:
+  install: false
+
 # jxRequirements override for preview
 jxRequirements:
   ingress:

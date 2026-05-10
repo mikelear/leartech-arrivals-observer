@@ -43,6 +43,14 @@ jxRequirements:
 
 knativeDeploy: false
 
+# CRD install — cluster-scoped Arrival CRD. true on the canonical install
+# (jx-staging release), false on per-PR preview deploys (the cluster
+# already has the CRD installed by the canonical release; previewing a
+# second copy errors out on Helm ownership). See templates/crd-arrival.yaml
+# for the full ownership-conflict explanation.
+crd:
+  install: true
+
 # Runtime config that ends up in the ConfigMap + mounted / env-injected.
 # Override per env via configs/<env>.yaml or preview helmfile set: block.
 config:
@@ -129,15 +137,13 @@ dispatch:
   timeoutMinutes: 30
   pollIntervalSeconds: 30
   # Container image used by the dispatched K8s Job to run a test pack
-  # against the arrival's stagingUrl. The image is responsible for
-  # writing results to gs://<bucket>/results/v1/post-deploy/<svc>/<sha>/
-  # <cluster>/<pack>/<test>.json. For 2.7.2 first cut we stub the dispatch
-  # (no Job created); this image setting is plumbed through for 2.7.2b.
-  # Default test-pack runner image. The `playwright-runner` ships
-  # Playwright + Chromium + gcloud + python + bash + npm — universal for
-  # both end2end (bash run.sh) and end2end-ui (npx playwright test) packs.
-  # Per-test-pack override via `services.<svc>.testPacks[].runnerImage`.
-  runnerImage: us-central1-docker.pkg.dev/product-first/oci/playwright-runner:0.28.0
+  # against the arrival's stagingUrl. Default `playwright-runner` ships
+  # Playwright + Chromium + gcloud + python + bash + npm — universal
+  # for both end2end (bash run.sh) and end2end-ui (npx playwright test).
+  # Override per-cluster via dispatch.runnerImageRegistry (e.g. AZ ACR).
+  runnerImageRegistry: us-central1-docker.pkg.dev/product-first/oci
+  runnerImageRepository: playwright-runner
+  runnerImageTag: "0.28.0"
   # Kubernetes Secret holding the GCS service-account JSON used by the
   # runner to upload results.json to the result-store bucket. Must exist
   # in the watch namespace; same secret as the pre-merge end2end task.
@@ -146,16 +152,79 @@ dispatch:
   # diff.json uploads.
   resultStoreBucket: test-artifacts-product-first
 
+  # Service-repo discovery for the clone step. Tests live in <repoHost>/
+  # <repoOrg>/<service>.git. Per-cluster override only when an org
+  # mirrors elsewhere (none today).
+  repoHost: github.com
+  repoOrg: mikelear
+
+  # Refspec fallback chain — tags JX may have created for the released
+  # version. Substituted at Go-side (CLUSTER, VERSION) before passing
+  # to the runner script. Order matters: most specific first.
+  refFallbacks:
+    - "v{{.Version}}-{{.Cluster}}"
+    - "v{{.Version}}"
+    - "{{.Version}}"
+    - "main"
+
+  # Health-probe params for the staging-url readiness check inside the
+  # runner. Defaults shipped to mirror prior hardcoded behaviour
+  # (10min total / 5s curl / 5s poll / 3 consecutive successes).
+  health:
+    endpoint: /health/live
+    timeoutSeconds: 600
+    curlSeconds: 5
+    pollSeconds: 5
+    successThreshold: 3
+
+  # Per-Job resource requests + limits. Override per cluster when nodes
+  # are tight or the runner needs more memory for trace recording.
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1500m
+      memory: 2Gi
+
+  # GitHub auth secret + key. tekton-bot/password is the JX convention
+  # (also used by the qa-gate task and ai-review/feedback tasks).
+  gitSecret:
+    name: tekton-git
+    key: password
+
+# CONTRACT — both writer (this chart's runner script) and reader
+# (gate-cli's post-deploy quill) must read these same paths. Keep
+# layout in sync with leartech-gate's verdict-comment URL builder.
+# Substitution is Go-text/template at the controller; the runner Job
+# receives the already-rendered prefix as RESULT_STORE_PATH_PREFIX
+# (no shell expansion needed inside the script).
+paths:
+  postDeployTemplate: "results/v1/post-deploy/{{.Cluster}}/{{.Namespace}}/{{.Service}}/{{.Version}}/{{.Pack}}"
+  forensicsTemplate: "forensics/v1/{{.Cluster}}/{{.Namespace}}/{{.Service}}/{{.Version}}"
+
 # Tempo span-diff forensics — auto-triggered when an Arrival reaches
 # phase=Failed. The controller fires a fire-and-forget K8s Job using
 # leartech-forensics-runner; the runner queries Tempo for two windows
 # (deployed_at ± windowMinutes), computes endpoint-level diff, uploads
-# to gs://<bucket>/forensics/v1/..., and patches Arrival.status.forensics.
+# to the result store, and patches Arrival.status.forensics.
 forensics:
   enabled: true
-  runnerImage: us-central1-docker.pkg.dev/product-first/oci/leartech-forensics-runner:0.0.2
+  # Same registry-split as dispatch.runnerImage* — override registry
+  # only per cluster; repo + tag stay default.
+  runnerImageRegistry: us-central1-docker.pkg.dev/product-first/oci
+  runnerImageRepository: leartech-forensics-runner
+  runnerImageTag: "0.0.2"
   tempoBaseUrl: http://tempo.jx-observability:3200
   windowMinutes: 5
+  # Span-diff thresholds. latencyRatio = p95(after) / p95(before)
+  # ratio above which we flag a regression (1.5 = 50% slower).
+  # errorRateDelta = absolute increase in error_rate (0.05 = 5%).
+  thresholds:
+    latencyRatio: 1.5
+    errorRateDelta: 0.05
+  # Wall-clock timeout for the runner's Tempo query / diff phase.
+  contextTimeoutMinutes: 5
 
 
 # tekton-git ExternalSecret — synced from cluster secret backend so the

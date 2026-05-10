@@ -9,12 +9,43 @@ data:
   # at ReplicaSet events and embeds stagingUrl + testPacks into each
   # Arrival's spec. Empty map = no service is configured for dispatch.
   SERVICES_JSON: {{ .Values.services | toJson | quote }}
+
   DISPATCH_TIMEOUT_MINUTES: {{ .Values.dispatch.timeoutMinutes | quote }}
   DISPATCH_POLL_INTERVAL_SECONDS: {{ .Values.dispatch.pollIntervalSeconds | quote }}
-  DISPATCH_RUNNER_IMAGE: {{ .Values.dispatch.runnerImage | quote }}
+  DISPATCH_RUNNER_IMAGE: {{ printf "%s/%s:%s" .Values.dispatch.runnerImageRegistry .Values.dispatch.runnerImageRepository .Values.dispatch.runnerImageTag | quote }}
   DISPATCH_RESULT_STORE_BUCKET: {{ .Values.dispatch.resultStoreBucket | quote }}
   DISPATCH_GCS_KEY_SECRET: {{ .Values.dispatch.gcsKeySecret | quote }}
+
+  # Repo discovery for the runner clone step.
+  DISPATCH_REPO_HOST: {{ .Values.dispatch.repoHost | quote }}
+  DISPATCH_REPO_ORG: {{ .Values.dispatch.repoOrg | quote }}
+  # Refspec fallback templates — | (pipe) separated; controller renders
+  # {{ "{{" }}.Version{{ "}}" }} / {{ "{{" }}.Cluster{{ "}}" }} per-Job.
+  DISPATCH_REF_FALLBACKS: {{ join "|" .Values.dispatch.refFallbacks | quote }}
+
+  # Health-probe params (forwarded to runner Job env so the script reads them).
+  DISPATCH_HEALTH_ENDPOINT: {{ .Values.dispatch.health.endpoint | quote }}
+  DISPATCH_HEALTH_TIMEOUT_SECONDS: {{ .Values.dispatch.health.timeoutSeconds | quote }}
+  DISPATCH_HEALTH_CURL_SECONDS: {{ .Values.dispatch.health.curlSeconds | quote }}
+  DISPATCH_HEALTH_POLL_SECONDS: {{ .Values.dispatch.health.pollSeconds | quote }}
+  DISPATCH_HEALTH_SUCCESS_THRESHOLD: {{ .Values.dispatch.health.successThreshold | quote }}
+
+  # Per-Job resources — typed as JSON so the controller can unmarshal
+  # straight into a corev1.ResourceRequirements.
+  DISPATCH_RESOURCES_JSON: {{ .Values.dispatch.resources | toJson | quote }}
+
+  # GitHub auth secret refs (fed into the runner Job's env via SecretKeyRef).
+  DISPATCH_GIT_SECRET_NAME: {{ .Values.dispatch.gitSecret.name | quote }}
+  DISPATCH_GIT_SECRET_KEY: {{ .Values.dispatch.gitSecret.key | quote }}
+
+  # Path templates — CONTRACT shared with leartech-gate's reader.
+  PATHS_POST_DEPLOY_TEMPLATE: {{ .Values.paths.postDeployTemplate | quote }}
+  PATHS_FORENSICS_TEMPLATE: {{ .Values.paths.forensicsTemplate | quote }}
+
   FORENSICS_ENABLED: {{ .Values.forensics.enabled | quote }}
-  FORENSICS_RUNNER_IMAGE: {{ .Values.forensics.runnerImage | quote }}
+  FORENSICS_RUNNER_IMAGE: {{ printf "%s/%s:%s" .Values.forensics.runnerImageRegistry .Values.forensics.runnerImageRepository .Values.forensics.runnerImageTag | quote }}
   FORENSICS_TEMPO_BASE_URL: {{ .Values.forensics.tempoBaseUrl | quote }}
   FORENSICS_WINDOW_MINUTES: {{ .Values.forensics.windowMinutes | quote }}
+  FORENSICS_LATENCY_RATIO: {{ .Values.forensics.thresholds.latencyRatio | quote }}
+  FORENSICS_ERROR_RATE_DELTA: {{ .Values.forensics.thresholds.errorRateDelta | quote }}
+  FORENSICS_CONTEXT_TIMEOUT_MINUTES: {{ .Values.forensics.contextTimeoutMinutes | quote }}

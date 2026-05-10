@@ -1,22 +1,26 @@
 // Package dispatch creates K8s Jobs that execute a single test pack
 // against an arrival's stagingUrl. Each Job:
 //
-//  1. Clones github.com/mikelear/<service> at tag v<version>
-//  2. Waits for STAGING_URL/health/live to return 200
+//  1. Clones <repoHost>/<repoOrg>/<service> at the highest-priority
+//     refspec from the configured fallback chain
+//  2. Waits for STAGING_URL/<healthEndpoint> to return 200 N times
 //  3. Runs the test pack (end2end → bash run.sh, end2end-ui → playwright)
-//  4. Uploads results.json to gs://<bucket>/results/v1/post-deploy/
-//     <service>/<version>/<cluster>/<pack>/results.json
-//  5. Exits 0 on success, 1 on test failure or runner crash
+//  4. Uploads results.json + Playwright artifacts to the result-store
+//     under the path template configured in chart values.paths
+//  5. Exits 0 on success, non-zero on test failure or runner crash
 //
-// The controller polls Job.status to drive the Arrival lifecycle. The
-// Job's pass/fail is the source of truth for now; a future result-store
-// reader can layer on top to capture per-test details from results.json.
+// Path layout (CONTRACT — must match leartech-gate's reader):
+//
+//	gs://<bucket>/results/v1/post-deploy/<cluster>/<namespace>/<service>/<version>/<pack>/
 package dispatch
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
+	"text/template"
 
 	"github.com/rs/zerolog/log"
 	batchv1 "k8s.io/api/batch/v1"
@@ -27,33 +31,44 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-// Config controls dispatch behaviour.
+// Config controls dispatch behaviour. Fields populated from chart values
+// via the observer's ConfigMap (see internal/config/config.go).
 type Config struct {
-	// RunnerImage is the default container image (overridable per test
-	// pack — defined in values.services.<name>.testPacks[].runnerImage,
-	// not yet wired through; using default for 2.7.2b first cut).
-	RunnerImage string
-
-	// ResultStoreBucket — gs://<bucket>/results/v1/post-deploy/...
-	ResultStoreBucket string
-
-	// GCSKeySecret holds the JSON service-account key for GCS upload.
-	// Must exist in the same namespace as the dispatched Job.
-	GCSKeySecret string
-
-	// ClusterID — recorded into the result-store path.
-	ClusterID string
-
-	// ActiveDeadlineSeconds caps the Job's runtime. Aligned to the
-	// controller's per-Arrival Timeout so the Job can't outlive the
-	// Arrival.
+	RunnerImage           string
+	ResultStoreBucket     string
+	GCSKeySecret          string
+	ClusterID             string
 	ActiveDeadlineSeconds int64
+
+	// Repo discovery
+	RepoHost             string
+	RepoOrg              string
+	RefFallbackTemplates []string // each is a Go text/template
+
+	// Health probe
+	HealthEndpoint         string
+	HealthTimeoutSeconds   int
+	HealthCurlSeconds      int
+	HealthPollSeconds      int
+	HealthSuccessThreshold int
+
+	// Resources for the dispatched Job pod.
+	Resources corev1.ResourceRequirements
+
+	// Git auth secret refs.
+	GitSecretName string
+	GitSecretKey  string
+
+	// PostDeployPathTemplate is the result-store path template (Go
+	// text/template). Rendered per (cluster, namespace, service, version,
+	// pack) at Dispatch-time and passed as RESULT_STORE_PATH_PREFIX env.
+	PostDeployPathTemplate string
 }
 
 // Test describes one test-pack to dispatch.
 type Test struct {
-	PackName string // e.g. "smoke"
-	PackType string // e.g. "end2end" or "end2end-ui"
+	PackName string // e.g. "end2end-ui"
+	PackType string // e.g. "end2end-ui"
 }
 
 // Args bundles the per-arrival fields needed to render a Job.
@@ -82,8 +97,11 @@ func (d *Dispatcher) Dispatch(ctx context.Context, args Args, tests []Test) (map
 	out := make(map[string]string, len(tests))
 	for _, t := range tests {
 		jobName := jobNameFor(args.ArrivalName, t.PackName)
-		job := d.buildJob(args, t, jobName)
-		_, err := d.clients.BatchV1().Jobs(args.Namespace).Create(ctx, job, metav1.CreateOptions{})
+		job, err := d.buildJob(args, t, jobName)
+		if err != nil {
+			return nil, fmt.Errorf("build job %s: %w", jobName, err)
+		}
+		_, err = d.clients.BatchV1().Jobs(args.Namespace).Create(ctx, job, metav1.CreateOptions{})
 		switch {
 		case err == nil:
 			log.Info().
@@ -92,7 +110,6 @@ func (d *Dispatcher) Dispatch(ctx context.Context, args Args, tests []Test) (map
 				Str("pack", t.PackName).
 				Msg("dispatched test job")
 		case apierrors.IsAlreadyExists(err):
-			// Idempotent — controller restarted mid-flight, Job still there.
 			log.Info().Str("job", jobName).Msg("job already exists; reusing")
 		default:
 			return nil, fmt.Errorf("create job %s: %w", jobName, err)
@@ -102,13 +119,50 @@ func (d *Dispatcher) Dispatch(ctx context.Context, args Args, tests []Test) (map
 	return out, nil
 }
 
+// pathVars is the substitution context for the post-deploy path template.
+type pathVars struct {
+	Cluster   string
+	Namespace string
+	Service   string
+	Version   string
+	Pack      string
+}
+
+// refVars is the substitution context for refspec fallback templates.
+// Pack/Service intentionally not exposed — refs are version+cluster-only.
+type refVars struct {
+	Version string
+	Cluster string
+}
+
 // buildJob constructs the Job spec. The container runs an inline bash
 // script that does clone+wait+test+upload — keeps the runner image
-// generic and the per-pack logic visible in the Arrival CR's owning
-// namespace.
-func (d *Dispatcher) buildJob(args Args, t Test, jobName string) *batchv1.Job {
+// generic and the per-pack logic visible in the Arrival CR's namespace.
+func (d *Dispatcher) buildJob(args Args, t Test, jobName string) (*batchv1.Job, error) {
 	const backoff int32 = 0 // no auto-retry; arrivals-observer manages retries
 	deadline := d.cfg.ActiveDeadlineSeconds
+
+	// Render path prefix once per Job — the runner script reads
+	// RESULT_STORE_PATH_PREFIX directly without any shell substitution.
+	prefix, err := renderTemplate(d.cfg.PostDeployPathTemplate, pathVars{
+		Cluster:   d.cfg.ClusterID,
+		Namespace: args.Namespace,
+		Service:   args.Service,
+		Version:   args.Version,
+		Pack:      t.PackName,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("render postDeployPathTemplate: %w", err)
+	}
+
+	// Render refspec fallbacks — space-joined for the script's `for`-loop.
+	refs, err := renderRefFallbacks(d.cfg.RefFallbackTemplates, refVars{
+		Version: args.Version,
+		Cluster: d.cfg.ClusterID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("render refFallbacks: %w", err)
+	}
 
 	envVars := []corev1.EnvVar{
 		{Name: "STAGING_URL", Value: args.StagingURL},
@@ -117,24 +171,45 @@ func (d *Dispatcher) buildJob(args Args, t Test, jobName string) *batchv1.Job {
 		{Name: "TEST_PACK", Value: t.PackName},
 		{Name: "TEST_PACK_TYPE", Value: t.PackType},
 		{Name: "RESULT_STORE_BUCKET", Value: d.cfg.ResultStoreBucket},
+		{Name: "RESULT_STORE_PATH_PREFIX", Value: prefix},
 		{Name: "CLUSTER_ID", Value: d.cfg.ClusterID},
+		{Name: "NAMESPACE", Value: args.Namespace},
 		{Name: "ARRIVAL_NAME", Value: args.ArrivalName},
+		{Name: "REPO_HOST", Value: d.cfg.RepoHost},
+		{Name: "REPO_ORG", Value: d.cfg.RepoOrg},
+		{Name: "REF_FALLBACKS", Value: strings.Join(refs, " ")},
+		{Name: "HEALTH_ENDPOINT", Value: d.cfg.HealthEndpoint},
+		{Name: "HEALTH_TIMEOUT_SECONDS", Value: fmt.Sprintf("%d", d.cfg.HealthTimeoutSeconds)},
+		{Name: "HEALTH_CURL_SECONDS", Value: fmt.Sprintf("%d", d.cfg.HealthCurlSeconds)},
+		{Name: "HEALTH_POLL_SECONDS", Value: fmt.Sprintf("%d", d.cfg.HealthPollSeconds)},
+		{Name: "HEALTH_SUCCESS_THRESHOLD", Value: fmt.Sprintf("%d", d.cfg.HealthSuccessThreshold)},
 		{Name: "GOOGLE_APPLICATION_CREDENTIALS", Value: "/var/run/secrets/test-artifacts/key.json"},
-		// GitHub auth — most service repos are PRIVATE; without a token
-		// the runner script's `git clone` returns 401 and reports it as
-		// "branch not found" (silent for caller). Use the same secret
-		// Tekton tasks use (`tekton-git/password`); optional so
-		// public-repo tests still work without it.
 		{
 			Name: "GIT_TOKEN",
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "tekton-git"},
-					Key:                  "password",
+					LocalObjectReference: corev1.LocalObjectReference{Name: d.cfg.GitSecretName},
+					Key:                  d.cfg.GitSecretKey,
 					Optional:             ptrBool(true),
 				},
 			},
 		},
+	}
+
+	resources := d.cfg.Resources
+	if len(resources.Requests) == 0 && len(resources.Limits) == 0 {
+		// Defensive default — chart should always set these but if running
+		// outside Helm (e.g. unit tests) we still want sane values.
+		resources = corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("250m"),
+				corev1.ResourceMemory: resource.MustParse("512Mi"),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("1500m"),
+				corev1.ResourceMemory: resource.MustParse("2Gi"),
+			},
+		}
 	}
 
 	return &batchv1.Job{
@@ -142,10 +217,10 @@ func (d *Dispatcher) buildJob(args Args, t Test, jobName string) *batchv1.Job {
 			Name:      jobName,
 			Namespace: args.Namespace,
 			Labels: map[string]string{
-				"qa.leartech.com/arrival":   args.ArrivalName,
-				"qa.leartech.com/service":   args.Service,
-				"qa.leartech.com/version":   sanitizeLabel(args.Version),
-				"qa.leartech.com/test-pack": t.PackName,
+				"qa.leartech.com/arrival":      args.ArrivalName,
+				"qa.leartech.com/service":      args.Service,
+				"qa.leartech.com/version":      sanitizeLabel(args.Version),
+				"qa.leartech.com/test-pack":    t.PackName,
 				"app.kubernetes.io/managed-by": "leartech-arrivals-observer",
 			},
 		},
@@ -179,50 +254,89 @@ func (d *Dispatcher) buildJob(args Args, t Test, jobName string) *batchv1.Job {
 							MountPath: "/var/run/secrets/test-artifacts",
 							ReadOnly:  true,
 						}},
-						Resources: corev1.ResourceRequirements{
-							Requests: corev1.ResourceList{
-								corev1.ResourceCPU:    resource.MustParse("250m"),
-								corev1.ResourceMemory: resource.MustParse("512Mi"),
-							},
-							Limits: corev1.ResourceList{
-								corev1.ResourceCPU:    resource.MustParse("1500m"),
-								corev1.ResourceMemory: resource.MustParse("2Gi"),
-							},
-						},
-						Command: []string{"bash", "-c", runnerScript},
+						Resources: resources,
+						Command:   []string{"bash", "-c", runnerScript},
 					}},
 				},
 			},
 		},
+	}, nil
+}
+
+// renderTemplate runs a Go text/template against the given data.
+// Returns "" if the template is empty (nothing to render).
+func renderTemplate(tmpl string, data any) (string, error) {
+	if tmpl == "" {
+		return "", nil
 	}
+	t, err := template.New("").Option("missingkey=error").Parse(tmpl)
+	if err != nil {
+		return "", fmt.Errorf("parse: %w", err)
+	}
+	var buf bytes.Buffer
+	if err := t.Execute(&buf, data); err != nil {
+		return "", fmt.Errorf("execute: %w", err)
+	}
+	return buf.String(), nil
+}
+
+// renderRefFallbacks renders each template in the list against the given
+// version/cluster context. Empty entries are dropped.
+func renderRefFallbacks(templates []string, vars refVars) ([]string, error) {
+	out := make([]string, 0, len(templates))
+	for _, tmpl := range templates {
+		s, err := renderTemplate(tmpl, vars)
+		if err != nil {
+			return nil, fmt.Errorf("ref %q: %w", tmpl, err)
+		}
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out, nil
+}
+
+// ParseResources unmarshals a chart-rendered JSON string into a
+// corev1.ResourceRequirements. Empty input → empty struct (controller
+// will fall back to dispatch.go's defensive defaults).
+func ParseResources(jsonStr string) (corev1.ResourceRequirements, error) {
+	var out corev1.ResourceRequirements
+	if jsonStr == "" || jsonStr == "{}" {
+		return out, nil
+	}
+	if err := json.Unmarshal([]byte(jsonStr), &out); err != nil {
+		return out, fmt.Errorf("parse resources JSON: %w", err)
+	}
+	return out, nil
 }
 
 // runnerScript is the inline bash that runs inside the Job container.
 // Reads env, clones, waits, runs the test pack, uploads results.
 const runnerScript = `set -euo pipefail
 echo "==> arrival=$ARRIVAL_NAME service=$SERVICE version=$VERSION pack=$TEST_PACK type=$TEST_PACK_TYPE"
-echo "==> stagingUrl=$STAGING_URL cluster=$CLUSTER_ID bucket=$RESULT_STORE_BUCKET"
+echo "==> stagingUrl=$STAGING_URL cluster=$CLUSTER_ID namespace=$NAMESPACE bucket=$RESULT_STORE_BUCKET"
+echo "==> resultPathPrefix=$RESULT_STORE_PATH_PREFIX"
 
 WORK=/tmp/work
 mkdir -p "$WORK" && cd "$WORK"
 
 # Most service repos are PRIVATE; embed the GitHub token in the clone
-# URL when available. Fall back to anonymous for public repos like
-# leartech-qa-canary. Without auth, private-repo clones get HTTP 401
-# which git reports as "branch not found" — masks the real failure.
+# URL when available. Fall back to anonymous for public repos. Without
+# auth, private-repo clones get HTTP 401 which git reports as
+# "branch not found" — masks the real failure.
 if [ -n "${GIT_TOKEN:-}" ]; then
-  REPO_URL="https://x-access-token:${GIT_TOKEN}@github.com/mikelear/${SERVICE}.git"
+  REPO_URL="https://x-access-token:${GIT_TOKEN}@${REPO_HOST}/${REPO_ORG}/${SERVICE}.git"
 else
-  REPO_URL="https://github.com/mikelear/${SERVICE}.git"
+  REPO_URL="https://${REPO_HOST}/${REPO_ORG}/${SERVICE}.git"
   echo "::WARN GIT_TOKEN not set; private-repo clones will fail with 401"
 fi
 
-# Per-service git tag schemes vary: most services tag as v<version>; the
-# JX-release multi-cluster pattern tags as v<version>-<cluster> (canary).
-# Some don't tag at all (chart-only releases). Try the most-specific
-# refspec first and fall through to less-specific ones, then main.
+# REF_FALLBACKS is a space-separated list rendered by the controller from
+# chart values.dispatch.refFallbacks. Try most-specific refspec first.
 clone_with_fallback() {
-  for ref in "v${VERSION}-${CLUSTER_ID}" "v${VERSION}" "${VERSION}" "main"; do
+  for ref in $REF_FALLBACKS; do
     [ -z "$ref" ] && continue
     echo "==> trying clone --branch=$ref"
     if git clone --depth=1 --branch "$ref" "$REPO_URL" repo 2>/dev/null; then
@@ -230,25 +344,26 @@ clone_with_fallback() {
       return 0
     fi
   done
-  echo "::FATAL no matching ref found (tried v<ver>-<cluster>, v<ver>, <ver>, main)"
+  echo "::FATAL no matching ref found (tried: $REF_FALLBACKS)"
   return 1
 }
 clone_with_fallback
 cd repo
 
-# Wait up to 10min for stagingUrl health.
-END=$(( $(date +%s) + 600 ))
+# Health-probe the staging URL — N consecutive successes within
+# HEALTH_TIMEOUT_SECONDS. Each curl times out after HEALTH_CURL_SECONDS.
+END=$(( $(date +%s) + HEALTH_TIMEOUT_SECONDS ))
 HEALTH=0
 while [ "$(date +%s)" -lt "$END" ]; do
-  if curl -sSf -o /dev/null -m 5 "${STAGING_URL}/health/live"; then
+  if curl -sSf -o /dev/null -m "$HEALTH_CURL_SECONDS" "${STAGING_URL}${HEALTH_ENDPOINT}"; then
     HEALTH=$((HEALTH+1))
-    [ "$HEALTH" -ge 3 ] && break
+    [ "$HEALTH" -ge "$HEALTH_SUCCESS_THRESHOLD" ] && break
   else
     HEALTH=0
   fi
-  sleep 5
+  sleep "$HEALTH_POLL_SECONDS"
 done
-[ "$HEALTH" -ge 3 ] || { echo "::FATAL stagingUrl health failed"; exit 1; }
+[ "$HEALTH" -ge "$HEALTH_SUCCESS_THRESHOLD" ] || { echo "::FATAL stagingUrl health failed"; exit 1; }
 echo "==> staging healthy"
 
 cd "$TEST_PACK"
@@ -278,9 +393,10 @@ esac
 gcloud auth activate-service-account --key-file="$GOOGLE_APPLICATION_CREDENTIALS" 2>/dev/null || \
   echo "::WARN gcloud auth failed (key-file missing?); uploads may fail"
 
-# Upload results.json if produced (end2end contract; end2end-ui synthesizes
-# from Playwright HTML report in a future iteration).
-DEST_PREFIX="gs://${RESULT_STORE_BUCKET}/results/v1/post-deploy/${SERVICE}/${VERSION}/${CLUSTER_ID}/${TEST_PACK}"
+# Upload destination: pre-rendered template prefix from controller
+# (CONTRACT — must match leartech-gate's reader).
+DEST_PREFIX="gs://${RESULT_STORE_BUCKET}/${RESULT_STORE_PATH_PREFIX}"
+
 if [ -f results.json ]; then
   echo "==> uploading results.json to ${DEST_PREFIX}/results.json"
   gsutil cp results.json "${DEST_PREFIX}/results.json" || \
@@ -288,9 +404,6 @@ if [ -f results.json ]; then
 fi
 
 # Playwright artifacts — trace.zip + screenshots + videos + HTML report.
-# These are huge wins for diagnosis: a failed test gets a clickable
-# trace.playwright.dev link in the gate's PR comment (terraform CORS
-# allowlist needed; see leartech-hub/shared-rules for setup).
 if [ -d "test-results" ]; then
   echo "==> uploading Playwright artifacts (test-results/) to ${DEST_PREFIX}/test-results/"
   gsutil -m cp -r test-results "${DEST_PREFIX}/" 2>&1 | tail -3 || \
@@ -339,6 +452,8 @@ func ptrBool(v bool) *bool    { return &v }
 // JobStatus summarises a Job's phase for the controller.
 type JobStatus int
 
+// JobStatus enum values. JobUnknown covers both NotFound and "no terminal
+// signal yet" — controller treats it as "keep polling".
 const (
 	JobUnknown JobStatus = iota
 	JobRunning

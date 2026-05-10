@@ -337,4 +337,3 @@ func labelOrDeployment(ctx context.Context, core kubernetes.Interface, rs *appsv
 	}
 	return ""
 }
-
