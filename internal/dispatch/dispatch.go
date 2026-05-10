@@ -260,17 +260,13 @@ case "$TEST_PACK_TYPE" in
     ;;
   end2end-ui)
     npm ci --no-audit --no-fund || npm install --no-audit --no-fund
-    # Force trace + screenshot + video collection for ALL tests so the
-    # post-deploy artifact set is rich enough to debug from. Pre-merge
-    # presubmits run with default config (lighter); post-deploy runs
-    # are diagnosis-grade.
+    # Trace/screenshot/video are config-only in Playwright (no CLI flag);
+    # service playwright.config.ts already enables them in 'use'. Add the
+    # html reporter alongside list so we get a browsable report uploaded.
     PREVIEW_URL="$STAGING_URL" \
-      PWTEST_BROWSER_TRACE=on \
       npx playwright test \
         --reporter=list,html \
         --trace=on \
-        --screenshot=on \
-        --video=retain-on-failure \
         || TEST_EXIT=$?
     ;;
   *)
