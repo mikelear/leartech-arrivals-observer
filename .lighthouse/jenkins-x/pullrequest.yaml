@@ -4,6 +4,14 @@ metadata:
   creationTimestamp: null
   name: pullrequest
 spec:
+  # Inlined (no `uses:`) variant of leartech-pipeline-catalog/tasks/go/
+  # pullrequest.yaml that drops `promote-jx-preview`. arrivals-observer
+  # is an in-cluster controller — its only HTTP surface is `/health/*`
+  # consumed by kubelet probes; it has no Ingress in production, so a
+  # preview deploy contributes nothing meaningful (external probes 404,
+  # end2end's wait-for-ready always times out). Build + scan + push image
+  # only. Mirrors leartech-forensics-runner's pullrequest.yaml; if/when
+  # `tasks/go-no-preview/` lands upstream we switch to `uses:`.
   pipelineSpec:
     tasks:
     - name: from-build-pack
@@ -11,13 +19,52 @@ spec:
       taskSpec:
         metadata: {}
         stepTemplate:
-          image: uses:mikelear/leartech-pipeline-catalog/tasks/go/pullrequest.yaml@main
+          env:
+          - name: HOME
+            value: /tekton/home
+          envFrom:
+          - secretRef:
+              name: jx-boot-job-env-vars
+              optional: true
           name: ""
-          resources: {}
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
           workingDir: /workspace/source
         steps:
-        - name: ""
+        - image: uses:jenkins-x/jx3-pipeline-catalog/tasks/git-clone/git-clone-pr.yaml@versionStream
+          name: ""
           resources: {}
+        - image: ghcr.io/jenkins-x/jx-boot:3.16.59
+          name: jx-variables
+          resources: {}
+          script: |
+            #!/usr/bin/env sh
+            jx gitops variables
+        - image: golang:1.26-alpine
+          name: build-make-build
+          resources: {}
+          script: |
+            #!/bin/sh
+            set -e
+            apk add --no-cache git make
+            go mod download
+            go build -trimpath -ldflags="-s -w" -o bin/server "${BUILD_TARGET:-./cmd/server}"
+        - image: gcr.io/kaniko-project/executor:v1.9.1-debug
+          name: build-container-build
+          resources: {}
+          script: |
+            #!/busybox/sh
+            source .jx/variables.sh
+            cp /tekton/creds/.docker/config.json /kaniko/.docker/config.json
+            /kaniko/executor $KANIKO_FLAGS \
+              --cache=true \
+              --cache-repo="$PUSH_CONTAINER_REGISTRY/$DOCKER_REGISTRY_ORG/kaniko-cache" \
+              --cache-ttl=168h \
+              --context=/workspace/source \
+              --dockerfile="${DOCKERFILE_PATH:-Dockerfile}" \
+              --destination="$PUSH_CONTAINER_REGISTRY/$DOCKER_REGISTRY_ORG/$APP_NAME:$VERSION"
   podTemplate:
     tolerations:
     - key: sku
