@@ -428,6 +428,41 @@ if [ -d "playwright-report" ]; then
     echo "::WARN playwright-report upload failed"
 fi
 
+# Contract translation: catalog-shared run.sh exits 0 regardless of
+# individual test outcomes (so the catalog's PR-time task uploads
+# artifacts then reads results.json.success). Our K8s Job-based
+# dispatcher needs the OPPOSITE — the Job's exit code MUST reflect
+# actual test pass/fail so arrivals-observer's controller marks
+# Arrival.phase correctly (which gates the qa-gate verdict downstream
+# and triggers forensics-runner on Failed). Read results.json here,
+# AFTER uploads but BEFORE final exit, and override TEST_EXIT when
+# success=false. Only relevant for end2end (Playwright end2end-ui
+# already propagates real exit codes via npx playwright test).
+# Verified 2026-05-11: without this translation, canary 0.0.7's
+# deliberate-fail test pack reached Arrival.phase=Passed despite
+# results.json.success=false.
+if [ "$TEST_PACK_TYPE" = "end2end" ] && [ "$TEST_EXIT" -eq 0 ] && [ -f results.json ]; then
+  REPORTED_SUCCESS=""
+  if command -v jq >/dev/null 2>&1; then
+    # Read .success directly — do NOT use the jq alternative operator
+    # (.success // true) because it returns true when .success is the
+    # literal value false (falsy). On missing key or malformed JSON,
+    # jq output is empty/null; || true swallows the exit code under
+    # set -e (jq exits non-zero on parse errors).
+    REPORTED_SUCCESS=$(jq -r '.success' results.json 2>/dev/null || true)
+  else
+    # Grep fallback for runner images without jq. Matches "success": false
+    # with optional whitespace.
+    if grep -qE '"success"[[:space:]]*:[[:space:]]*false' results.json; then
+      REPORTED_SUCCESS="false"
+    fi
+  fi
+  if [ "$REPORTED_SUCCESS" = "false" ]; then
+    echo "==> results.json.success=false — overriding TEST_EXIT 0 → 1 so Arrival.phase=Failed"
+    TEST_EXIT=1
+  fi
+fi
+
 echo "==> done; test exit code=${TEST_EXIT}"
 exit $TEST_EXIT
 `
