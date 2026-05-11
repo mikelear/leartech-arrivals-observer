@@ -34,11 +34,6 @@ spec:
     context: "ai-review"
     always_run: true
     source: ai-review/pullrequest.yaml
-  - name: end2end
-    context: "end2end"
-    always_run: true
-    optional: true
-    source: end2end.yaml
   - name: ai-feedback
     context: ai-feedback
     always_run: false
