@@ -1,6 +1,9 @@
 package dispatch
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -115,5 +118,149 @@ func TestParseResources_Real(t *testing.T) {
 	}
 	if r.Limits.Memory().String() != "2Gi" {
 		t.Errorf("limits.memory = %s, want 2Gi", r.Limits.Memory().String())
+	}
+}
+
+// TestRunnerScript_ResultsJSONOverridesTestExit locks the contract that the
+// dispatcher's inline runner script translates results.json.success=false
+// into a non-zero exit code for end2end packs — even when the catalog's
+// shared run.sh exits 0 (its intentional design for PR-time uploads).
+//
+// Without this translation, K8s Job.Status.Succeeded=1, controller marks
+// Arrival.phase=Passed, and forensics-runner is never triggered — exactly
+// the bug discovered on 2026-05-11 (canary 0.0.7 deliberate-fail demo
+// showed phase=Passed despite 1/2 checks failing).
+//
+// The script test runs the override fragment as a standalone bash snippet
+// against synthetic results.json fixtures. Doesn't exercise the full
+// runner (which needs a kube client + GCS + a real service); validates the
+// translation logic in isolation.
+func TestRunnerScript_ResultsJSONOverridesTestExit(t *testing.T) {
+	// Mirrors the fragment in runnerScript (kept literal here so a test
+	// failure pinpoints regressions — if you change the script, change
+	// this too).
+	fragment := `
+if [ "$TEST_PACK_TYPE" = "end2end" ] && [ "$TEST_EXIT" -eq 0 ] && [ -f results.json ]; then
+  REPORTED_SUCCESS=""
+  if command -v jq >/dev/null 2>&1; then
+    REPORTED_SUCCESS=$(jq -r '.success' results.json 2>/dev/null || true)
+  else
+    if grep -qE '"success"[[:space:]]*:[[:space:]]*false' results.json; then
+      REPORTED_SUCCESS="false"
+    fi
+  fi
+  if [ "$REPORTED_SUCCESS" = "false" ]; then
+    TEST_EXIT=1
+  fi
+fi
+exit $TEST_EXIT
+`
+	cases := []struct {
+		name       string
+		packType   string
+		startExit  string
+		results    string
+		wantExit   int
+		wantReason string
+	}{
+		{
+			name:       "end2end success:false overrides exit 0 → 1",
+			packType:   "end2end",
+			startExit:  "0",
+			results:    `{"success":false,"summary":"1/2 checks passed"}`,
+			wantExit:   1,
+			wantReason: "deliberate fail must produce Failed Arrival so forensics fires",
+		},
+		{
+			name:       "end2end success:true keeps exit 0",
+			packType:   "end2end",
+			startExit:  "0",
+			results:    `{"success":true,"summary":"2/2 checks passed"}`,
+			wantExit:   0,
+			wantReason: "passing tests must not be downgraded",
+		},
+		{
+			name:       "end2end pre-existing non-zero exit preserved",
+			packType:   "end2end",
+			startExit:  "2",
+			results:    `{"success":true}`,
+			wantExit:   2,
+			wantReason: "guard `TEST_EXIT -eq 0` prevents masking earlier failures (image pull, runner crash, etc.)",
+		},
+		{
+			name:       "end2end-ui not gated (Playwright exit propagates natively)",
+			packType:   "end2end-ui",
+			startExit:  "0",
+			results:    `{"success":false,"summary":"1/2 failed"}`,
+			wantExit:   0,
+			wantReason: "Playwright exit code is already correct; don't second-guess",
+		},
+		{
+			name:       "end2end missing results.json keeps exit 0",
+			packType:   "end2end",
+			startExit:  "0",
+			results:    "", // empty → don't write the file
+			wantExit:   0,
+			wantReason: "no results.json could mean runner crashed before write; preserve existing exit",
+		},
+		{
+			name:       "end2end malformed results.json (jq fallback) preserves exit",
+			packType:   "end2end",
+			startExit:  "0",
+			results:    `not even json`,
+			wantExit:   0,
+			wantReason: "jq returns 'true' for missing .success; grep fallback only triggers on exact pattern",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.results != "" {
+				if err := os.WriteFile(filepath.Join(dir, "results.json"), []byte(tc.results), 0o600); err != nil {
+					t.Fatalf("write fixture: %v", err)
+				}
+			}
+			cmd := exec.Command("bash", "-eo", "pipefail", "-c", fragment)
+			cmd.Dir = dir
+			cmd.Env = append(os.Environ(),
+				"TEST_PACK_TYPE="+tc.packType,
+				"TEST_EXIT="+tc.startExit,
+			)
+			err := cmd.Run()
+			gotExit := 0
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				gotExit = exitErr.ExitCode()
+			} else if err != nil {
+				t.Fatalf("bash run failed unexpectedly: %v", err)
+			}
+			if gotExit != tc.wantExit {
+				t.Errorf("exit code = %d, want %d (%s)", gotExit, tc.wantExit, tc.wantReason)
+			}
+		})
+	}
+}
+
+// TestRunnerScript_FragmentMatchesEmbedded is a defensive coupling check —
+// the literal fragment in TestRunnerScript_ResultsJSONOverridesTestExit
+// MUST stay in sync with the override block inside runnerScript. If you
+// edit one, edit the other (no clever sharing because runnerScript is a
+// large template literal interpolated with config; isolating the fragment
+// without breaking that interpolation would obscure both).
+//
+// This test fails loudly if the canonical override string drifts away from
+// what we test against — a forcing function to update both at once.
+func TestRunnerScript_FragmentMatchesEmbedded(t *testing.T) {
+	required := []string{
+		`if [ "$TEST_PACK_TYPE" = "end2end" ] && [ "$TEST_EXIT" -eq 0 ] && [ -f results.json ]; then`,
+		`REPORTED_SUCCESS=$(jq -r '.success' results.json 2>/dev/null || true)`,
+		`if grep -qE '"success"[[:space:]]*:[[:space:]]*false' results.json; then`,
+		`if [ "$REPORTED_SUCCESS" = "false" ]; then`,
+		`TEST_EXIT=1`,
+	}
+	for _, want := range required {
+		if !strings.Contains(runnerScript, want) {
+			t.Errorf("runnerScript no longer contains expected fragment:\n  %s", want)
+		}
 	}
 }
