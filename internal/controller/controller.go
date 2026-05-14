@@ -53,6 +53,16 @@ var arrivalGVR = schema.GroupVersionResource{
 	Resource: "arrivals",
 }
 
+// deploymentGVR identifies apps/v1 Deployments. Read via the dynamic
+// client in waitForDeploymentRollout to gate test dispatch on the
+// rolling update completing — see qa-architecture/tier-2-demo.md for
+// the canary 0.0.21 incident that motivated this gate.
+var deploymentGVR = schema.GroupVersionResource{
+	Group:    "apps",
+	Version:  "v1",
+	Resource: "deployments",
+}
+
 // Config controls the controller's behaviour.
 type Config struct {
 	Namespace      string
@@ -76,6 +86,13 @@ type Config struct {
 	// Forensics is dispatched fire-and-forget when an Arrival reaches a
 	// terminal Failed/Timeout phase. nil disables forensics entirely.
 	Forensics *forensics.Dispatcher
+
+	// RolloutTimeout caps how long handleNewArrival waits for the parent
+	// Deployment's rolling update to complete before dispatching tests.
+	// Without this gate, tests run during the K8s rolling-update window
+	// and observe a mixed old+new pod response (see Tier-2 demo finding
+	// in qa-architecture/tier-2-demo.md). Zero falls back to 5 minutes.
+	RolloutTimeout time.Duration
 }
 
 // Controller runs the Arrival lifecycle loop.
@@ -229,6 +246,27 @@ func (c *Controller) handlePending(ctx context.Context, u *unstructured.Unstruct
 	// Failures here are logged + dropped — don't block dispatch on a
 	// malformed env entry; tests may still pass with defaults.
 	env := decodeEnvVars(envSpec)
+
+	// Gate test dispatch on Deployment rollout completion. Without this
+	// tests run during the K8s rolling-update window and observe a
+	// mixed old+new pod response — Tier-2 demo on canary 0.0.21
+	// (2026-05-14) captured a 5004ms /api/v1/example span from a
+	// draining old pod even though the new pod responded in ~350ms.
+	// Polls Deployment status until kubectl-rollout-status-equivalent
+	// conditions hold (observedGeneration current, updated == spec,
+	// available == spec, unavailable == 0), or times out. Missing
+	// Deployment (non-Deployment-backed services) → skip the gate.
+	if c.cfg.Dispatcher != nil {
+		timeout := c.cfg.RolloutTimeout
+		if timeout <= 0 {
+			timeout = 5 * time.Minute
+		}
+		if err := c.waitForDeploymentRollout(ctx, c.cfg.Namespace, service, timeout); err != nil {
+			log.Error().Err(err).Str("arrival", name).Str("deploy", service).Msg("rollout did not complete; arrival → Failed")
+			c.finalize(ctx, u, PhaseFailed)
+			return
+		}
+	}
 
 	// Dispatch Jobs (or stub-finalize if no dispatcher configured).
 	var jobNames map[string]string
@@ -583,4 +621,82 @@ func buildRestConfig(kubeconfig string) (*rest.Config, error) {
 		return clientcmd.BuildConfigFromFlags("", kubeconfig)
 	}
 	return rest.InClusterConfig()
+}
+
+// rolloutPollInterval is the cadence at which waitForDeploymentRollout
+// re-checks Deployment status. 5s is short enough to react quickly to
+// rollout completion (typical rolling update is 30-60s) without
+// hammering the API server.
+const rolloutPollInterval = 5 * time.Second
+
+// waitForDeploymentRollout polls the named Deployment until its rolling
+// update has fully completed (only new-version pods serving), or until
+// timeout elapses. Returns nil on success.
+//
+// Mirrors kubectl rollout status semantics — all four conditions hold:
+//   - observedGeneration  >= generation     (controller saw the spec)
+//   - updatedReplicas     == spec.replicas  (all new pods exist)
+//   - availableReplicas   == spec.replicas  (all new pods Ready)
+//   - unavailableReplicas == 0
+//
+// Without this gate, observer dispatches tests during the rolling-
+// update window where the K8s Service load-balances across BOTH old
+// and new pods. Tests measure mixed behavior, polluting results.json
+// + Tempo trace data — Tier-2 demo on canary 0.0.21 captured a 5004ms
+// /api/v1/example span from a draining old pod while the new pod
+// responded in ~350ms.
+//
+// Graceful when Deployment doesn't exist (non-Deployment-backed
+// services like StatefulSet-based services): logs + returns nil so
+// dispatch proceeds. The gate is a best-effort guard, not a hard
+// invariant.
+func (c *Controller) waitForDeploymentRollout(ctx context.Context, namespace, name string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		d, err := c.dynamic.Resource(deploymentGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			log.Warn().Str("namespace", namespace).Str("deploy", name).Msg("Deployment not found; assuming non-Deployment-backed service, proceeding without rollout gate")
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("get deployment %s/%s: %w", namespace, name, err)
+		}
+		if isDeploymentRolledOut(d) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout after %s waiting for deployment %s/%s to roll out", timeout, namespace, name)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(rolloutPollInterval):
+		}
+	}
+}
+
+// isDeploymentRolledOut returns true when all four kubectl-rollout-
+// status conditions hold for the given Deployment.
+func isDeploymentRolledOut(d *unstructured.Unstructured) bool {
+	specReplicas, _, _ := unstructured.NestedInt64(d.Object, "spec", "replicas")
+	if specReplicas == 0 {
+		// Deployments without explicit spec.replicas default to 1 in K8s
+		// but unstructured leaves it as missing. Treat as 1 to match the
+		// API server's defaulting behavior.
+		specReplicas = 1
+	}
+
+	generation := d.GetGeneration()
+	observedGen, _, _ := unstructured.NestedInt64(d.Object, "status", "observedGeneration")
+	if observedGen < generation {
+		return false
+	}
+
+	updated, _, _ := unstructured.NestedInt64(d.Object, "status", "updatedReplicas")
+	available, _, _ := unstructured.NestedInt64(d.Object, "status", "availableReplicas")
+	unavailable, _, _ := unstructured.NestedInt64(d.Object, "status", "unavailableReplicas")
+
+	return updated == specReplicas &&
+		available == specReplicas &&
+		unavailable == 0
 }
