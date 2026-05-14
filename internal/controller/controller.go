@@ -383,10 +383,14 @@ func (c *Controller) handleTesting(ctx context.Context, u *unstructured.Unstruct
 	})
 	log.Info().Str("arrival", name).Str("phase", phase).Msg("arrival finalized (real dispatch)")
 
-	// Fire-and-forget forensics on terminal Failed (or Timeout). Disabled
-	// when no Forensics dispatcher is configured (Forensics nil) — same
-	// graceful-degrade pattern as the test dispatcher.
-	if (phase == PhaseFailed || phase == PhaseTimeout) && c.cfg.Forensics != nil {
+	// Fire-and-forget forensics on every terminal phase, Passed included.
+	// The Tempo snapshot is valuable per-arrival regardless of outcome:
+	// Failed/Timeout answers "why did this break?", Passed answers "did
+	// anything quietly degrade?" — the latter is what gate-cli's Layer 1
+	// duration-regression check needs to drill into.
+	// Disabled when Forensics is nil (same graceful-degrade pattern as
+	// the test dispatcher).
+	if c.cfg.Forensics != nil {
 		c.maybeDispatchForensics(ctx, u)
 	}
 }
