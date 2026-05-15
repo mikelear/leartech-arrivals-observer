@@ -26,10 +26,11 @@ spec:
     context: "image-scan"
     always_run: true
     source: security-scan/image-scan.yaml
-  - name: dynamic-scan
-    context: "dynamic-scan"
-    always_run: true
-    source: security-scan/dynamic/pullrequest.yaml
+  # No dynamic-scan: arrivals-observer is an in-cluster controller with
+  # no public HTTP surface (only kubelet /health probes), so nuclei/
+  # nikto-style scanners have nothing to point at. Mirrors forensics-
+  # runner's triggers and the same rationale as the inlined no-preview
+  # pullrequest.yaml above (#109).
   - name: ai-review
     context: "ai-review"
     always_run: true
