@@ -11,6 +11,7 @@ require (
 	github.com/mikelear/leartech-go-common v0.2.1-0.20260515103428-122eb86da0d5
 	github.com/prometheus/client_golang v1.20.5
 	github.com/rs/zerolog v1.33.0
+	github.com/stretchr/testify v1.11.1
 	go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin v0.68.0
 	k8s.io/api v0.36.0
 	k8s.io/apimachinery v0.36.0

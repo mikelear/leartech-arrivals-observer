@@ -17,6 +17,8 @@ package dispatch
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -467,15 +469,41 @@ echo "==> done; test exit code=${TEST_EXIT}"
 exit $TEST_EXIT
 `
 
+// jobNameFor builds the K8s Job name for an arrival × pack pair.
+//
+// K8s Pods derived from Jobs are named "<job-name>-<random-suffix>"
+// (~6 chars). Pod names must be DNS-1123 LABELS — max 63 chars — so the
+// Job name itself is effectively capped at 63 to leave room. K8s
+// enforces this at create time.
+//
+// Naïve truncation (name[:63]) chops mid-string and can lose the pack
+// suffix entirely — e.g. "ar-leartech-angular-service-template-0-0-13-
+// jx-staging-end2end-ui" cuts to "...jx-stagi" with no pack name, and
+// the controller's job-status polling can't find the Job back.
+//
+// Strategy: short names pass through unchanged. Long names get a
+// deterministic 8-char SHA-256 hash of the arrival name, then the pack
+// suffix concatenated verbatim — pack stays visible for `kubectl get
+// jobs | grep <pack>` and the hash is stable across observer restarts
+// so the status-poll keeps working.
 func jobNameFor(arrivalName, pack string) string {
-	// K8s names are limited to 63 chars; truncate aggressively.
-	name := fmt.Sprintf("ar-%s-%s", arrivalName, pack)
-	name = strings.ReplaceAll(name, "_", "-")
-	name = strings.ToLower(name)
-	if len(name) > 63 {
-		name = name[:63]
+	arr := strings.ToLower(strings.ReplaceAll(arrivalName, "_", "-"))
+	p := strings.ToLower(strings.ReplaceAll(pack, "_", "-"))
+	name := fmt.Sprintf("ar-%s-%s", arr, p)
+	if len(name) <= 63 {
+		return name
 	}
-	return name
+
+	h := sha256.Sum256([]byte(arr))
+	hashPart := hex.EncodeToString(h[:4]) // 8 chars; collision risk negligible per service
+	// Budget: "ar-" + 8 + "-" + len(p) = 12 + len(p). If pack alone exceeds
+	// 51 chars, truncate the pack too (extreme edge — real pack names are
+	// "end2end", "smoke", "end2end-ui" etc.).
+	const maxPack = 51
+	if len(p) > maxPack {
+		p = strings.TrimRight(p[:maxPack], "-")
+	}
+	return fmt.Sprintf("ar-%s-%s", hashPart, p)
 }
 
 func sanitizeLabel(s string) string {
