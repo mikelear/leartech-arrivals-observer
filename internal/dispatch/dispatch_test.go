@@ -83,10 +83,54 @@ func TestJobNameFor(t *testing.T) {
 	}
 }
 
-func TestJobNameFor_TruncatesLongInput(t *testing.T) {
-	got := jobNameFor("an-arrival-name-that-is-far-too-long-to-fit-in-the-k8s-limit", "endeavour")
-	if len(got) != 63 {
-		t.Errorf("expected exactly 63 chars after truncation, got %d: %q", len(got), got)
+func TestJobNameFor_LongArrival_PreservesPackName(t *testing.T) {
+	// The original bug: arrival names approaching ~50 chars + a pack name
+	// like "end2end-ui" exceed 63, and blunt truncation chopped the pack
+	// off entirely so the controller couldn't find the Job back.
+	arr := "leartech-angular-service-template-0-0-13-jx-staging"
+	got := jobNameFor(arr, "end2end-ui")
+	if len(got) > 63 {
+		t.Errorf("len(got)=%d exceeds 63: %q", len(got), got)
+	}
+	if !strings.HasSuffix(got, "-end2end-ui") {
+		t.Errorf("pack name lost on truncation: %q", got)
+	}
+	if !strings.HasPrefix(got, "ar-") {
+		t.Errorf("expected ar- prefix: %q", got)
+	}
+}
+
+func TestJobNameFor_LongArrival_StableAcrossCalls(t *testing.T) {
+	// The status-poll path retrieves jobs by name later; same input must
+	// yield the same name across observer restarts.
+	arr := "leartech-angular-service-template-0-0-13-jx-staging"
+	a := jobNameFor(arr, "end2end-ui")
+	b := jobNameFor(arr, "end2end-ui")
+	if a != b {
+		t.Errorf("expected deterministic output, got %q vs %q", a, b)
+	}
+}
+
+func TestJobNameFor_LongArrival_DifferentArrivalsDiffer(t *testing.T) {
+	// Hash should differentiate between two long-named arrivals — collisions
+	// at the 4-byte-hash level are negligible per service.
+	a := jobNameFor("leartech-angular-service-template-0-0-13-jx-staging", "end2end-ui")
+	b := jobNameFor("leartech-angular-service-template-0-0-14-jx-staging", "end2end-ui")
+	if a == b {
+		t.Errorf("two distinct arrivals produced the same job name: %q", a)
+	}
+}
+
+func TestJobNameFor_ExtremelyLongPack_TruncatedSafely(t *testing.T) {
+	// Realistic pack names are short, but the truncation branch is exercised
+	// here to lock the invariant.
+	veryLongPack := strings.Repeat("x", 100)
+	got := jobNameFor("a-very-very-very-very-very-very-very-very-long-arrival-name", veryLongPack)
+	if len(got) > 63 {
+		t.Errorf("len(got)=%d exceeds 63: %q", len(got), got)
+	}
+	if !strings.HasSuffix(got, "x") {
+		t.Errorf("pack name must not end with trailing dash: %q", got)
 	}
 }
 
