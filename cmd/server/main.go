@@ -28,13 +28,14 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
+	"github.com/mikelear/leartech-go-common/pkg/tracing"
+
 	"github.com/mikelear/leartech-arrivals-observer/internal/config"
 	"github.com/mikelear/leartech-arrivals-observer/internal/controller"
 	"github.com/mikelear/leartech-arrivals-observer/internal/dispatch"
 	"github.com/mikelear/leartech-arrivals-observer/internal/forensics"
 	"github.com/mikelear/leartech-arrivals-observer/internal/handlers"
 	"github.com/mikelear/leartech-arrivals-observer/internal/middleware"
-	"github.com/mikelear/leartech-arrivals-observer/internal/tracing"
 	"github.com/mikelear/leartech-arrivals-observer/internal/watcher"
 )
 
