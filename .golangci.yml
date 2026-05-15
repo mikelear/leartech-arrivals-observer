@@ -3,6 +3,13 @@
 # both CI (tasks/go-lint/pullrequest.yaml) and `make lint-config` locally.
 version: "2"
 
+run:
+  # k8s.io/client-go is a deep dependency tree; with kubernetes/fake +
+  # dynamic/fake imported in the test packages, buildir + nilness analysis
+  # exceeds the catalog's 5m default. Local bump until we move expensive
+  # linters off test files (or upstream the bump).
+  timeout: 20m
+
 formatters:
   settings:
     goimports:
