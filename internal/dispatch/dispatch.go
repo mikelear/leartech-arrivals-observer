@@ -12,6 +12,18 @@
 // Path layout (CONTRACT — must match leartech-gate's reader):
 //
 //	gs://<bucket>/results/v1/post-deploy/<cluster>/<namespace>/<service>/<version>/<pack>/
+//
+// Runner env contract for test scripts:
+//
+//	STAGING_URL        — full service URL set ONLY in staging dispatches
+//	                     (used as discriminator: `[ -z "$STAGING_URL" ]` →
+//	                     PR-preview context, skip-in-staging tests; the
+//	                     inverse for preview-only tests)
+//	STAGING_HOST_BASE  — bare cluster domain (host minus "<service>-" prefix),
+//	                     mirrors the catalog end2end-ui task's PREVIEW_HOST_BASE.
+//	                     Compose peer URLs as "https://<peer>-${STAGING_HOST_BASE}".
+//	SERVICE, VERSION, TEST_PACK, TEST_PACK_TYPE, NAMESPACE, CLUSTER_ID,
+//	ARRIVAL_NAME — identifying metadata for results.json + artifact paths.
 package dispatch
 
 import (
@@ -21,6 +33,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 	"text/template"
 
@@ -174,6 +187,16 @@ func (d *Dispatcher) buildJob(args Args, t Test, jobName string) (*batchv1.Job, 
 
 	standardEnv := []corev1.EnvVar{
 		{Name: "STAGING_URL", Value: args.StagingURL},
+		// STAGING_HOST_BASE is the bare cluster domain (the part after the
+		// service-name prefix). Mirrors PREVIEW_HOST_BASE set by the catalog
+		// end2end-ui task in PR-preview contexts, so staging-aware end2end
+		// scripts can compose peer-service URLs as
+		// "https://<peer-service>-${STAGING_HOST_BASE}" without each service
+		// having to hand-inject the value.
+		//
+		// Derived: parse STAGING_URL host, strip leading "<service>-".
+		// Empty when args.StagingURL is empty (services with no stagingUrl).
+		{Name: "STAGING_HOST_BASE", Value: stagingHostBase(args.StagingURL, args.Service)},
 		{Name: "SERVICE", Value: args.Service},
 		{Name: "VERSION", Value: args.Version},
 		{Name: "TEST_PACK", Value: t.PackName},
@@ -504,6 +527,35 @@ func jobNameFor(arrivalName, pack string) string {
 		p = strings.TrimRight(p[:maxPack], "-")
 	}
 	return fmt.Sprintf("ar-%s-%s", hashPart, p)
+}
+
+// stagingHostBase returns the bare cluster domain part of a staging URL —
+// the host with the leading "<service>-" prefix stripped. Mirrors the
+// catalog end2end-ui task's PREVIEW_HOST_BASE so staging-aware end2end
+// scripts can compose peer URLs as "https://<peer>-${STAGING_HOST_BASE}".
+//
+// Examples:
+//
+//	stagingHostBase("https://leartech-auth-service-jx-staging.az.leartech.com",
+//	                "leartech-auth-service") = "jx-staging.az.leartech.com"
+//	stagingHostBase("", "x")                     = ""
+//	stagingHostBase("https://only-host", "svc")  = "only-host" (no service prefix)
+//
+// Returns empty on parse errors. Callers that genuinely need the bare
+// domain in staging should test for empty explicitly (and most won't —
+// the standard pattern is to source it from this env when present).
+func stagingHostBase(stagingURL, service string) string {
+	if stagingURL == "" {
+		return ""
+	}
+	u, err := url.Parse(stagingURL)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	if service != "" {
+		return strings.TrimPrefix(u.Host, service+"-")
+	}
+	return u.Host
 }
 
 func sanitizeLabel(s string) string {

@@ -64,6 +64,39 @@ func TestParseResources_Empty(t *testing.T) {
 	}
 }
 
+func TestStagingHostBase(t *testing.T) {
+	tests := []struct {
+		name, url, service, want string
+	}{
+		{"strips service prefix on AZ",
+			"https://leartech-auth-service-jx-staging.az.leartech.com", "leartech-auth-service",
+			"jx-staging.az.leartech.com"},
+		{"strips service prefix on GCP",
+			"https://leartech-auth-service-jx-staging.jx.leartech.com", "leartech-auth-service",
+			"jx-staging.jx.leartech.com"},
+		{"empty URL returns empty",
+			"", "leartech-auth-service",
+			""},
+		{"empty service returns full host",
+			"https://example.com:8080/path", "",
+			"example.com:8080"},
+		{"URL without service prefix returns full host",
+			"https://only-host.example.com", "leartech-auth-service",
+			"only-host.example.com"},
+		{"malformed URL returns empty",
+			"://bad", "leartech-auth-service",
+			""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := stagingHostBase(tc.url, tc.service)
+			if got != tc.want {
+				t.Errorf("stagingHostBase(%q, %q) = %q, want %q", tc.url, tc.service, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestJobNameFor(t *testing.T) {
 	tests := []struct {
 		arrival, pack, want string
