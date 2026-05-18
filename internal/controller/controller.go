@@ -184,6 +184,15 @@ func (c *Controller) reconcileAll(ctx context.Context) {
 	}
 }
 
+// retestCooldown rate-limits the "terminal-phase retest on rolling
+// restart" branch in reconcileOne. Multiple ReplicaSet events per
+// rollout (one per replica) shouldn't each trigger an independent
+// retest — the watcher upserts spec.deployedAt on every event. The
+// cooldown gates the terminal→Pending flip on finalizedAt being at
+// least this old, so a typical rolling restart re-tests exactly once
+// after the rollout settles, not N times.
+const retestCooldown = 5 * time.Minute
+
 // reconcileOne drives a single Arrival forward by one step.
 func (c *Controller) reconcileOne(ctx context.Context, u *unstructured.Unstructured) {
 	name := u.GetName()
@@ -204,9 +213,55 @@ func (c *Controller) reconcileOne(ctx context.Context, u *unstructured.Unstructu
 			log.Info().Str("arrival", name).Msg("Skipped → Pending (testPacks now present)")
 			c.patchStatus(ctx, name, map[string]any{"phase": PhasePending})
 		}
+	case PhasePassed, PhaseFailed, PhaseTimeout:
+		// Terminal-phase Arrivals are normally left alone. But when an
+		// operator runs `kubectl rollout restart deploy/<svc>` (or any
+		// rolling update of the same version) the watcher upserts
+		// spec.deployedAt to the new ReplicaSet's creationTimestamp.
+		// If that deployedAt is AFTER status.finalizedAt, the existing
+		// terminal verdict is stale — the rerun is a deliberate
+		// re-test request. Reset to Pending + clear status.tests so
+		// handlePending re-dispatches.
+		//
+		// Gated by a 5-minute cooldown against finalizedAt so a single
+		// rollout's burst of replica-add events doesn't trigger N
+		// retests (only the first one fires; the rest see Phase=Pending
+		// or Phase=Testing).
+		if c.shouldRetestOnRollout(u) {
+			log.Info().Str("arrival", name).Str("oldPhase", phase).Msg("rollout-restart detected — terminal → Pending (clearing tests for re-dispatch)")
+			c.patchStatus(ctx, name, map[string]any{"phase": PhasePending, "tests": []any{}})
+		}
 	default:
-		// other terminal phases ignored
+		// unknown phase — leave alone
 	}
+}
+
+// shouldRetestOnRollout returns true when an Arrival in a terminal
+// phase has a deployedAt that's newer than finalizedAt by at least
+// retestCooldown. Helper isolated for unit-testability.
+func (c *Controller) shouldRetestOnRollout(u *unstructured.Unstructured) bool {
+	deployedAtStr, _, _ := unstructured.NestedString(u.Object, "spec", "deployedAt")
+	finalizedAtStr, _, _ := unstructured.NestedString(u.Object, "status", "finalizedAt")
+	if deployedAtStr == "" || finalizedAtStr == "" {
+		return false
+	}
+	deployedAt, err := time.Parse(time.RFC3339, deployedAtStr)
+	if err != nil {
+		return false
+	}
+	finalizedAt, err := time.Parse(time.RFC3339, finalizedAtStr)
+	if err != nil {
+		return false
+	}
+	// Trigger when deployedAt is newer than finalizedAt + cooldown.
+	// The cooldown anchors on finalizedAt (not "now") so that:
+	//  - a rollout that lands 30s after finalize doesn't fire (false
+	//    positive — same release just settling)
+	//  - a manual `kubectl rollout restart` minutes later DOES fire
+	//  - a burst of replica events during a single restart all see
+	//    the SAME deployedAt → only the first reconcile crosses the
+	//    threshold, subsequent ones see phase=Pending and fall through
+	return deployedAt.After(finalizedAt.Add(retestCooldown))
 }
 
 // handlePending triages a fresh arrival: no testPacks → Skipped; otherwise

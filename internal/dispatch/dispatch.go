@@ -36,6 +36,7 @@ import (
 	"net/url"
 	"strings"
 	"text/template"
+	"time"
 
 	"github.com/rs/zerolog/log"
 	batchv1 "k8s.io/api/batch/v1"
@@ -114,6 +115,14 @@ func New(cfg Config, clients kubernetes.Interface) *Dispatcher {
 
 // Dispatch creates one Job per Test. Returns a map test-pack-name → job-name
 // for the controller to record on Arrival.status.tests[].jobName.
+//
+// On AlreadyExists (re-dispatch — e.g. rollout-restart retest via the
+// controller's terminal→Pending path, #143), the existing Job is
+// deleted then re-created. Without delete-before-create, a stale
+// Failed Job blocks every retry: Create fails → controller finalize(Failed)
+// → next reconcile sees terminal+stale deployedAt → re-trigger → Create
+// fails → loop. Foreground propagation ensures the prior Job's Pods +
+// trace ConfigMaps are cleaned up before the new Job creates its own.
 func (d *Dispatcher) Dispatch(ctx context.Context, args Args, tests []Test) (map[string]string, error) {
 	out := make(map[string]string, len(tests))
 	for _, t := range tests {
@@ -131,13 +140,57 @@ func (d *Dispatcher) Dispatch(ctx context.Context, args Args, tests []Test) (map
 				Str("pack", t.PackName).
 				Msg("dispatched test job")
 		case apierrors.IsAlreadyExists(err):
-			log.Info().Str("job", jobName).Msg("job already exists; reusing")
+			log.Info().Str("job", jobName).Msg("job already exists — deleting + recreating for re-dispatch")
+			if err := d.deleteJobAndWait(ctx, args.Namespace, jobName); err != nil {
+				return nil, fmt.Errorf("delete stale job %s: %w", jobName, err)
+			}
+			if _, err := d.clients.BatchV1().Jobs(args.Namespace).Create(ctx, job, metav1.CreateOptions{}); err != nil {
+				return nil, fmt.Errorf("recreate job %s after delete: %w", jobName, err)
+			}
+			log.Info().
+				Str("arrival", args.ArrivalName).
+				Str("job", jobName).
+				Str("pack", t.PackName).
+				Msg("dispatched test job (after deleting stale)")
 		default:
 			return nil, fmt.Errorf("create job %s: %w", jobName, err)
 		}
 		out[t.PackName] = jobName
 	}
 	return out, nil
+}
+
+// deleteJobAndWait deletes a Job with Foreground propagation (cascades
+// to owned Pods) and polls until the Job is gone from the API server.
+// Required because Create-after-Delete races otherwise: the apiserver
+// returns AlreadyExists if the prior Job is still pending finalizer
+// cleanup. Bounded poll — gives up after ~30s and lets the caller's
+// Create attempt fail naturally with a clear error.
+func (d *Dispatcher) deleteJobAndWait(ctx context.Context, namespace, jobName string) error {
+	policy := metav1.DeletePropagationForeground
+	err := d.clients.BatchV1().Jobs(namespace).Delete(ctx, jobName, metav1.DeleteOptions{
+		PropagationPolicy: &policy,
+	})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete: %w", err)
+	}
+	// Poll until gone or timeout. 1s ticks, 30s budget.
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		_, err := d.clients.BatchV1().Jobs(namespace).Get(ctx, jobName, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("poll get: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+	return fmt.Errorf("timeout waiting for job %s deletion (foreground propagation still in progress)", jobName)
 }
 
 // pathVars is the substitution context for the post-deploy path template.
