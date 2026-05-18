@@ -35,6 +35,7 @@ import (
 	"github.com/mikelear/leartech-arrivals-observer/internal/dispatch"
 	"github.com/mikelear/leartech-arrivals-observer/internal/forensics"
 	"github.com/mikelear/leartech-arrivals-observer/internal/handlers"
+	"github.com/mikelear/leartech-arrivals-observer/internal/leader"
 	"github.com/mikelear/leartech-arrivals-observer/internal/middleware"
 	"github.com/mikelear/leartech-arrivals-observer/internal/watcher"
 )
@@ -85,23 +86,8 @@ func run() error {
 	}
 	log.Info().Int("services", len(services)).Msg("services map loaded")
 
-	// Start the ReplicaSet informer + Arrival CR creator in a goroutine.
-	// On every Added event matching the filter (chart-managed Deployments
-	// in cfg.WatchNamespace), upserts an Arrival CR keyed by
-	// <service>-<version>-<namespace>. Per-service stagingUrl + testPacks
-	// come from the services map (chart values).
-	w, err := watcher.New(ctx, watcher.Config{
-		Namespace:      cfg.WatchNamespace,
-		ClusterID:      cfg.ClusterID,
-		KubeConfigPath: cfg.KubeConfigPath, // empty = in-cluster
-		Services:       services,
-	})
-	if err != nil {
-		return fmt.Errorf("init watcher: %w", err)
-	}
-	go w.Run(ctx)
-
-	// Build a kubernetes client for the dispatcher (Job CRUD).
+	// Build a kubernetes client for the dispatcher (Job CRUD) + leader
+	// election (Lease CRUD).
 	kubeClient, err := newKubeClient(cfg.KubeConfigPath)
 	if err != nil {
 		return fmt.Errorf("kubernetes client: %w", err)
@@ -162,19 +148,48 @@ func run() error {
 		log.Info().Bool("enabled", cfg.ForensicsEnabled).Str("image", cfg.ForensicsRunnerImage).Msg("forensics disabled")
 	}
 
-	// Start the Arrival lifecycle controller.
-	ctrl, err := controller.New(ctx, controller.Config{
-		Namespace:      cfg.WatchNamespace,
-		KubeConfigPath: cfg.KubeConfigPath,
-		PollInterval:   cfg.DispatchPollInterval(),
-		Timeout:        cfg.DispatchTimeout(),
-		Dispatcher:     dispatcher,
-		Forensics:      forensicsDispatcher,
-	})
-	if err != nil {
-		return fmt.Errorf("init controller: %w", err)
-	}
-	go ctrl.Run(ctx)
+	// Watcher + controller run only on the leader pod. Both are
+	// write-heavy paths against Arrival CRs and Jobs; running them
+	// concurrently across replicas produces a race where each pod
+	// independently dispatches + finalizes the same Arrival (#13).
+	// Followers maintain no informer cache — the lease handoff cost
+	// is one full LIST on promotion (~200ms for current Arrival counts).
+	go func() {
+		err := leader.RunLeaderElection(ctx, leader.Config{
+			LeaseName: "leartech-arrivals-observer-leader",
+			Namespace: cfg.WatchNamespace,
+			Client:    kubeClient,
+		}, func(leaderCtx context.Context) {
+			w, err := watcher.New(leaderCtx, watcher.Config{
+				Namespace:      cfg.WatchNamespace,
+				ClusterID:      cfg.ClusterID,
+				KubeConfigPath: cfg.KubeConfigPath,
+				Services:       services,
+			})
+			if err != nil {
+				log.Error().Err(err).Msg("init watcher (as leader)")
+				return
+			}
+			go w.Run(leaderCtx)
+
+			ctrl, err := controller.New(leaderCtx, controller.Config{
+				Namespace:      cfg.WatchNamespace,
+				KubeConfigPath: cfg.KubeConfigPath,
+				PollInterval:   cfg.DispatchPollInterval(),
+				Timeout:        cfg.DispatchTimeout(),
+				Dispatcher:     dispatcher,
+				Forensics:      forensicsDispatcher,
+			})
+			if err != nil {
+				log.Error().Err(err).Msg("init controller (as leader)")
+				return
+			}
+			ctrl.Run(leaderCtx)
+		})
+		if err != nil {
+			log.Error().Err(err).Msg("leader election failed")
+		}
+	}()
 
 	// Health + metrics HTTP server (K8s probes, Prometheus scrape).
 	router := gin.New()
