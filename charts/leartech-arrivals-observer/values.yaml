@@ -1,30 +1,24 @@
 nameOverride: ""
 fullnameOverride: ""
-
 image:
-  repository: ""  # set by release.yaml promote-changelog step
-  tag: ""         # set by release.yaml promote-changelog step
+  repository: "us-central1-docker.pkg.dev/product-first/oci/leartech-arrivals-observer"
+  tag: "0.0.33"
   pullPolicy: IfNotPresent
-
 replicaCount: 2
-
 serviceAccount:
   create: true
   name: ""
   annotations: {}
-
 service:
   name: leartech-arrivals-observer
   type: ClusterIP
   port: 8080
   externalPort: 8080
-
 # Ingress annotations + overrides (domain comes from jxRequirements)
 ingress:
   annotations: {}
   pathType: ImplementationSpecific
   labels: {}
-
 # jxRequirements — auto-populated from jx-values.yaml per cluster/env.
 # Do NOT hardcode domains here.
 jxRequirements:
@@ -40,9 +34,7 @@ jxRequirements:
       enabled: false
       production: false
       secretName: ""
-
 knativeDeploy: false
-
 # CRD install — cluster-scoped Arrival CRD. true on the canonical install
 # (jx-staging release), false on per-PR preview deploys (the cluster
 # already has the CRD installed by the canonical release; previewing a
@@ -50,13 +42,11 @@ knativeDeploy: false
 # for the full ownership-conflict explanation.
 crd:
   install: true
-
 # Runtime config that ends up in the ConfigMap + mounted / env-injected.
 # Override per env via configs/<env>.yaml or preview helmfile set: block.
 config:
-  cluster: ""  # "gcp" | "az" — set from .Values.global or env-specific
+  cluster: "" # "gcp" | "az" — set from .Values.global or env-specific
   logLevel: info
-
 # OpenTelemetry traces — emitted via OTLP HTTP to the cluster's Tempo.
 # Default endpoint resolves on both GCP and AZ clusters (same service name
 # in jx-observability). Set tracing.enabled=false to fully no-op the SDK
@@ -64,14 +54,12 @@ config:
 tracing:
   enabled: true
   endpoint: tempo.jx-observability:4318
-
 # Postgres wiring — DB credentials come from ExternalSecret (ESO) referencing
 # the cluster's secret backend (GSM on GCP, AKV on Azure).
 database:
   # arrivals-observer has no DB — it watches K8s and writes Arrival CRs.
   # Keeping the block so the chart stays template-shaped, but default off.
   enabled: false
-
   # Name of the database within the shared Postgres cluster. Per golden-std:
   # database-per-service, no cross-DB joins.
   name: leartech_go_service_template
@@ -79,7 +67,6 @@ database:
   secretName: leartech-arrivals-observer-db
   # Key inside that secret holding the full DSN.
   secretKey: DATABASE_URL
-
   # ExternalSecret (ESO) — syncs the DATABASE_URL from the cluster's secret
   # backend. Disable for local/kind or if you provision the secret manually.
   externalSecret:
@@ -89,33 +76,26 @@ database:
     storeKind: ClusterSecretStore
     # Remote key in the backend — defaults to {{ fullname }}-database-url
     remoteKey: ""
-
 migrations:
   enabled: false
   image:
     repository: ghcr.io/kukymbr/goose-docker
     tag: "3.22.1"
-
 # go-common auth.Config — populated as env vars with AUTH_ prefix
 auth:
   tokenUrl: ""
   clientId: ""
-  clientSecret: ""  # from ExternalSecret, not values
+  clientSecret: "" # from ExternalSecret, not values
   audience: ""
-
 probes:
   liveness: {}
   readiness: {}
   startup: {}
-
-resources: {}  # library defaults apply if empty
-
+resources: {} # library defaults apply if empty
 podAnnotations: {}
-
 nodeSelector: {}
 tolerations: []
 affinity: {}
-
 # Per-service dispatch config — the watcher reads this map at ReplicaSet
 # events and embeds stagingUrl + testPacks into each Arrival's spec.
 # Service name = app.kubernetes.io/name on the ReplicaSet. Services NOT in
@@ -130,7 +110,6 @@ affinity: {}
 #       testPacks:
 #         - { name: smoke, type: end2end }
 services: {}
-
 # Test dispatch tunables. timeoutMinutes is wall-clock per Arrival; once
 # elapsed, remaining tests get Timeout and the Arrival is finalized.
 dispatch:
@@ -151,22 +130,19 @@ dispatch:
   # Result-store bucket — shared by both test-pack results and forensics
   # diff.json uploads.
   resultStoreBucket: test-artifacts-product-first
-
   # Service-repo discovery for the clone step. Tests live in <repoHost>/
   # <repoOrg>/<service>.git. Per-cluster override only when an org
   # mirrors elsewhere (none today).
   repoHost: github.com
   repoOrg: mikelear
-
   # Refspec fallback chain — tags JX may have created for the released
   # version. Substituted at Go-side (CLUSTER, VERSION) before passing
   # to the runner script. Order matters: most specific first.
   refFallbacks:
-    - "v{{.Version}}-{{.Cluster}}"
-    - "v{{.Version}}"
-    - "{{.Version}}"
-    - "main"
-
+  - "v{{.Version}}-{{.Cluster}}"
+  - "v{{.Version}}"
+  - "{{.Version}}"
+  - "main"
   # Health-probe params for the staging-url readiness check inside the
   # runner. Defaults shipped to mirror prior hardcoded behaviour
   # (10min total / 5s curl / 5s poll / 3 consecutive successes).
@@ -176,7 +152,6 @@ dispatch:
     curlSeconds: 5
     pollSeconds: 5
     successThreshold: 3
-
   # Per-Job resource requests + limits. Override per cluster when nodes
   # are tight or the runner needs more memory for trace recording.
   resources:
@@ -186,13 +161,11 @@ dispatch:
     limits:
       cpu: 1500m
       memory: 2Gi
-
   # GitHub auth secret + key. tekton-bot/password is the JX convention
   # (also used by the qa-gate task and ai-review/feedback tasks).
   gitSecret:
     name: tekton-git
     key: password
-
 # CONTRACT — both writer (this chart's runner script) and reader
 # (gate-cli's post-deploy quill) must read these same paths. Keep
 # layout in sync with leartech-gate's verdict-comment URL builder.
@@ -202,7 +175,6 @@ dispatch:
 paths:
   postDeployTemplate: "results/v1/post-deploy/{{.Cluster}}/{{.Namespace}}/{{.Service}}/{{.Version}}/{{.Pack}}"
   forensicsTemplate: "forensics/v1/{{.Cluster}}/{{.Namespace}}/{{.Service}}/{{.Version}}"
-
 # Tempo span-diff forensics — auto-triggered when an Arrival reaches
 # phase=Failed. The controller fires a fire-and-forget K8s Job using
 # leartech-forensics-runner; the runner queries Tempo for two windows
@@ -225,7 +197,6 @@ forensics:
     errorRateDelta: 0.05
   # Wall-clock timeout for the runner's Tempo query / diff phase.
   contextTimeoutMinutes: 5
-
   # GitHub Issue lifecycle for performance regressions (runner #9).
   # When true the dispatched forensics-runner opens / updates / closes
   # Issues on the service repo when latency or error-rate regressions
@@ -236,8 +207,6 @@ forensics:
   # GitHub org for service-repo Issues. Runner side defaults to
   # "mikelear" when this is unset; override only if forks live elsewhere.
   issueRepoOwner: mikelear
-
-
 # tekton-git ExternalSecret — synced from cluster secret backend so the
 # dispatched test-runner Job can clone PRIVATE service repos. Default
 # create:true. On clusters where another chart owns this secret already
@@ -245,7 +214,6 @@ forensics:
 # cluster override to avoid conflict.
 tektonGit:
   create: true
-
 # Backend toggle for ExternalSecrets — same pattern as ai-classifier /
 # auth-service / automated-agent. Per-cluster overlay enables the right
 # backend (gcp on gsm, azure on akv).
