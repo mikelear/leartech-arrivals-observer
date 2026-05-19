@@ -226,6 +226,17 @@ forensics:
   # Wall-clock timeout for the runner's Tempo query / diff phase.
   contextTimeoutMinutes: 5
 
+  # GitHub Issue lifecycle for performance regressions (runner #9).
+  # When true the dispatched forensics-runner opens / updates / closes
+  # Issues on the service repo when latency or error-rate regressions
+  # are detected. Default off — flip per-cluster via the GitOps repo's
+  # configs/leartech-arrivals-observer.yaml after smoke-validating on
+  # staging. Pairs with #156's env wiring through forensics dispatcher.
+  enableIssueCreation: false
+  # GitHub org for service-repo Issues. Runner side defaults to
+  # "mikelear" when this is unset; override only if forks live elsewhere.
+  issueRepoOwner: mikelear
+
 
 # tekton-git ExternalSecret — synced from cluster secret backend so the
 # dispatched test-runner Job can clone PRIVATE service repos. Default

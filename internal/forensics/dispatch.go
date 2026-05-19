@@ -49,6 +49,17 @@ type Config struct {
 
 	// Wall-clock cap for the runner's Tempo query / diff phase.
 	ContextTimeoutMinutes int
+
+	// EnableIssueCreation, when true, makes the runner open / update /
+	// close a GitHub Issue on the service repo when latency or error-
+	// rate regressions are detected (pairs with forensics-runner #9
+	// Issue lifecycle code). Default off — flip to true via chart values
+	// once the runner image carrying that code is deployed and validated.
+	EnableIssueCreation bool
+
+	// IssueRepoOwner is the GitHub org for service-repo Issues. Defaults
+	// to "mikelear" on the runner side when unset.
+	IssueRepoOwner string
 }
 
 // Args bundles the per-Arrival fields needed to render a forensics Job.
@@ -138,6 +149,22 @@ func (d *Dispatcher) buildJob(args Args, jobName string) *batchv1.Job {
 		// path; this also keeps gcloud state out of the Job's tmp lifetime.
 		{Name: "CLOUDSDK_CONFIG", Value: "/tmp/gcloud"},
 		{Name: "HOME", Value: "/tmp"},
+		// Issue-opening lifecycle for performance regressions (runner #9).
+		// Default behaviour stays off (chart enableIssueCreation:false)
+		// until validated end-to-end on staging; then flip per-cluster.
+		{Name: "ENABLE_ISSUE_CREATION", Value: fmt.Sprintf("%t", d.cfg.EnableIssueCreation)},
+		{Name: "ISSUE_REPO_OWNER", Value: d.cfg.IssueRepoOwner},
+		// GITHUB_TOKEN from tekton-git secret — the same secret the
+		// dispatch test-runner uses for private repo clones. Optional:
+		// if missing the runner logs a warning and skips issue
+		// management (best-effort by design).
+		{Name: "GITHUB_TOKEN", ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "tekton-git"},
+				Key:                  "password",
+				Optional:             ptrBool(true),
+			},
+		}},
 	}
 
 	return &batchv1.Job{

@@ -97,6 +97,13 @@ type Config struct {
 	ForensicsLatencyRatio          float64 `envconfig:"FORENSICS_LATENCY_RATIO" default:"1.5"`
 	ForensicsErrorRateDelta        float64 `envconfig:"FORENSICS_ERROR_RATE_DELTA" default:"0.05"`
 	ForensicsContextTimeoutMinutes int     `envconfig:"FORENSICS_CONTEXT_TIMEOUT_MINUTES" default:"5"`
+
+	// Issue-opening lifecycle inside the forensics-runner (runner #9).
+	// When true the runner opens / updates / closes GitHub Issues on
+	// the service repo for latency or error-rate regressions. Default
+	// false — flip per-cluster via chart values after smoke-test.
+	ForensicsEnableIssueCreation bool   `envconfig:"FORENSICS_ENABLE_ISSUE_CREATION" default:"false"`
+	ForensicsIssueRepoOwner      string `envconfig:"FORENSICS_ISSUE_REPO_OWNER" default:"mikelear"`
 }
 
 // Load reads env and returns a populated Config.

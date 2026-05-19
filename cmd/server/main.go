@@ -142,6 +142,8 @@ func run() error {
 			LatencyRatio:          cfg.ForensicsLatencyRatio,
 			ErrorRateDelta:        cfg.ForensicsErrorRateDelta,
 			ContextTimeoutMinutes: cfg.ForensicsContextTimeoutMinutes,
+			EnableIssueCreation:   cfg.ForensicsEnableIssueCreation,
+			IssueRepoOwner:        cfg.ForensicsIssueRepoOwner,
 		}, kubeClient)
 		log.Info().Str("image", cfg.ForensicsRunnerImage).Msg("forensics dispatcher enabled")
 	} else {
