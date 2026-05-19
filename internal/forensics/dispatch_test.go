@@ -101,6 +101,24 @@ func TestBuildJob_IssueCreationEnvWired(t *testing.T) {
 	_ = strings.Contains // keep strings import alive in case it was already used above
 }
 
+func TestBuildJob_MinBaselineSamplesEnvWired(t *testing.T) {
+	d := &Dispatcher{cfg: Config{
+		Enabled:            true,
+		RunnerImage:        "registry.example.com/forensics-runner:0.0.12",
+		MinBaselineSamples: 1, // canary opt-out
+	}}
+	job := d.buildJob(Args{ArrivalName: "n", ArrivalNamespace: "ns"}, "j")
+	for _, e := range job.Spec.Template.Spec.Containers[0].Env {
+		if e.Name == "MIN_BASELINE_SAMPLES" {
+			if e.Value != "1" {
+				t.Errorf("MIN_BASELINE_SAMPLES = %q, want %q", e.Value, "1")
+			}
+			return
+		}
+	}
+	t.Error("MIN_BASELINE_SAMPLES env not present")
+}
+
 func TestBuildJob_IssueCreationDefaultFalse(t *testing.T) {
 	d := &Dispatcher{cfg: Config{
 		Enabled:     true,
