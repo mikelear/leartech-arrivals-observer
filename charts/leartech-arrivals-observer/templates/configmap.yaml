@@ -49,3 +49,5 @@ data:
   FORENSICS_LATENCY_RATIO: {{ .Values.forensics.thresholds.latencyRatio | quote }}
   FORENSICS_ERROR_RATE_DELTA: {{ .Values.forensics.thresholds.errorRateDelta | quote }}
   FORENSICS_CONTEXT_TIMEOUT_MINUTES: {{ .Values.forensics.contextTimeoutMinutes | quote }}
+  FORENSICS_ENABLE_ISSUE_CREATION: {{ .Values.forensics.enableIssueCreation | quote }}
+  FORENSICS_ISSUE_REPO_OWNER: {{ .Values.forensics.issueRepoOwner | quote }}
