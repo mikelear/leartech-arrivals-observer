@@ -283,6 +283,31 @@ func (c *Controller) handlePending(ctx context.Context, u *unstructured.Unstruct
 		return
 	}
 
+	// Re-entry guard. Dispatch is non-idempotent (creates a K8s Job).
+	// The reconcile ticker reads the informer cache which is eventually-
+	// consistent — a quick re-reconcile after Dispatch + patchStatus
+	// (phase=Testing) can still observe Phase=Pending from a stale cache
+	// read and call handlePending again. Without this guard, the second
+	// call enters Dispatch → AlreadyExists → #144's delete-stale path →
+	// Foreground propagation can't kill the still-running pod in 30s →
+	// timeout → Arrival → Failed with Tests=[] (the very signature
+	// 2026-05-18 17:08-17:09 dotnet-template@0.0.8 hit on both clusters).
+	//
+	// Atomic check+set: if we already kicked off dispatch for this
+	// Arrival, return immediately. Successor reconciles after the phase
+	// patch propagates will route via the phase switch to handleTesting
+	// anyway. inFlight is cleared by finalize (line 470 / 647), so a
+	// genuine re-dispatch after terminal→Pending (rollout-restart #143)
+	// proceeds normally.
+	c.mu.Lock()
+	if _, dispatched := c.inFlight[name]; dispatched {
+		c.mu.Unlock()
+		log.Debug().Str("arrival", name).Msg("handlePending: already dispatched (informer-cache lag); skipping re-entry")
+		return
+	}
+	c.inFlight[name] = time.Now()
+	c.mu.Unlock()
+
 	// Build Test list for the dispatcher.
 	tests := make([]dispatch.Test, 0, len(packs))
 	for _, p := range packs {
@@ -364,9 +389,8 @@ func (c *Controller) handlePending(ctx context.Context, u *unstructured.Unstruct
 		Bool("realDispatch", c.cfg.Dispatcher != nil).
 		Msg("dispatching tests — Pending → Testing")
 
-	c.mu.Lock()
-	c.inFlight[name] = time.Now()
-	c.mu.Unlock()
+	// Note: inFlight was set at the top of this function as the re-entry
+	// guard. We don't re-set it here. cleared by finalize on terminal.
 
 	c.patchStatus(ctx, name, map[string]any{
 		"phase": PhaseTesting,
