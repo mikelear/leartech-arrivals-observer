@@ -142,6 +142,7 @@ func run() error {
 			LatencyRatio:          cfg.ForensicsLatencyRatio,
 			ErrorRateDelta:        cfg.ForensicsErrorRateDelta,
 			ContextTimeoutMinutes: cfg.ForensicsContextTimeoutMinutes,
+			MinBaselineSamples:    cfg.ForensicsMinBaselineSamples,
 			EnableIssueCreation:   cfg.ForensicsEnableIssueCreation,
 			IssueRepoOwner:        cfg.ForensicsIssueRepoOwner,
 		}, kubeClient)

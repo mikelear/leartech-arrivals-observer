@@ -226,6 +226,14 @@ forensics:
   # Wall-clock timeout for the runner's Tempo query / diff phase.
   contextTimeoutMinutes: 5
 
+  # Minimum baseline samples per endpoint for a latency regression to
+  # be flaggable. Default 3 protects against single-curl noise in
+  # high-traffic services. Lower to 1 on low-traffic services (canary
+  # smoke that hits each endpoint exactly once) so legitimate huge
+  # ratios still get flagged. Plumbed through to the dispatched runner
+  # Job as MIN_BASELINE_SAMPLES.
+  minBaselineSamples: 3
+
   # GitHub Issue lifecycle for performance regressions (runner #9).
   # When true the dispatched forensics-runner opens / updates / closes
   # Issues on the service repo when latency or error-rate regressions

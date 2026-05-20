@@ -10,9 +10,9 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("PORT", "")
 	t.Setenv("CLUSTER_ID", "")
 	t.Setenv("WATCH_NAMESPACE", "")
-	os.Unsetenv("PORT")
-	os.Unsetenv("CLUSTER_ID")
-	os.Unsetenv("WATCH_NAMESPACE")
+	_ = os.Unsetenv("PORT")
+	_ = os.Unsetenv("CLUSTER_ID")
+	_ = os.Unsetenv("WATCH_NAMESPACE")
 
 	cfg, err := Load()
 	if err != nil {

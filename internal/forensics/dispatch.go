@@ -46,6 +46,11 @@ type Config struct {
 	// Diff thresholds — env-overridable, default-tuned.
 	LatencyRatio   float64
 	ErrorRateDelta float64
+	// MinBaselineSamples — minimum sample count in the baseline window
+	// per endpoint for a regression to be flaggable. 0 → runner uses
+	// built-in default (3). Set 1 to opt out of the statistical guard
+	// for low-traffic services (canary smoke, etc.).
+	MinBaselineSamples int
 
 	// Wall-clock cap for the runner's Tempo query / diff phase.
 	ContextTimeoutMinutes int
@@ -140,6 +145,7 @@ func (d *Dispatcher) buildJob(args Args, jobName string) *batchv1.Job {
 		{Name: "WINDOW_MINUTES", Value: fmt.Sprintf("%d", d.cfg.WindowMinutes)},
 		{Name: "LATENCY_RATIO", Value: fmt.Sprintf("%g", d.cfg.LatencyRatio)},
 		{Name: "ERROR_RATE_DELTA", Value: fmt.Sprintf("%g", d.cfg.ErrorRateDelta)},
+		{Name: "MIN_BASELINE_SAMPLES", Value: fmt.Sprintf("%d", d.cfg.MinBaselineSamples)},
 		{Name: "CONTEXT_TIMEOUT_MINUTES", Value: fmt.Sprintf("%d", d.cfg.ContextTimeoutMinutes)},
 		{Name: "GOOGLE_APPLICATION_CREDENTIALS", Value: "/var/run/secrets/test-artifacts/key.json"},
 		// gcloud writes its config to $HOME/.config/gcloud by default.

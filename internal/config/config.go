@@ -97,6 +97,12 @@ type Config struct {
 	ForensicsLatencyRatio          float64 `envconfig:"FORENSICS_LATENCY_RATIO" default:"1.5"`
 	ForensicsErrorRateDelta        float64 `envconfig:"FORENSICS_ERROR_RATE_DELTA" default:"0.05"`
 	ForensicsContextTimeoutMinutes int     `envconfig:"FORENSICS_CONTEXT_TIMEOUT_MINUTES" default:"5"`
+	// ForensicsMinBaselineSamples gates latency-regression flagging — a
+	// baseline endpoint with fewer than this many samples is treated as
+	// statistically meaningless. Default 3 protects against single-curl
+	// noise. Low-traffic services (e.g. canary smoke that hits a path
+	// exactly once) can lower to 1 to opt out of the guard.
+	ForensicsMinBaselineSamples int `envconfig:"FORENSICS_MIN_BASELINE_SAMPLES" default:"3"`
 
 	// Issue-opening lifecycle inside the forensics-runner (runner #9).
 	// When true the runner opens / updates / closes GitHub Issues on
