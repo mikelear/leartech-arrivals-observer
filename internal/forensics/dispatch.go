@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"strings"
 	"text/template"
+	"time"
 
 	"github.com/rs/zerolog/log"
 	batchv1 "k8s.io/api/batch/v1"
@@ -105,11 +106,62 @@ func (d *Dispatcher) Dispatch(ctx context.Context, args Args) (string, error) {
 			Str("job", jobName).
 			Msg("dispatched forensics job")
 	case apierrors.IsAlreadyExists(err):
-		log.Info().Str("job", jobName).Msg("forensics job already exists; reusing")
+		// Re-dispatch path (e.g. #143 rollout-restart retest): the stale
+		// Job from the prior cycle still exists and Create returns
+		// AlreadyExists. Mirror the test-runner dispatcher (#144) and
+		// delete-then-create so the new Arrival's forensics run actually
+		// fires against the fresh test-execution window rather than
+		// silently reusing the prior verdict. Without this, the
+		// post-finalize forensics is a no-op and Arrival.status.forensics
+		// keeps showing the stale diff (which on the canary slowdown
+		// demo on 2026-05-20 hid the regression that should have opened
+		// an Issue).
+		log.Info().Str("job", jobName).Msg("forensics job already exists — deleting + recreating for re-dispatch")
+		if err := d.deleteJobAndWait(ctx, args.ArrivalNamespace, jobName); err != nil {
+			return "", fmt.Errorf("delete stale forensics job %s: %w", jobName, err)
+		}
+		if _, err := d.clients.BatchV1().Jobs(args.ArrivalNamespace).Create(ctx, job, metav1.CreateOptions{}); err != nil {
+			return "", fmt.Errorf("recreate forensics job %s after delete: %w", jobName, err)
+		}
+		log.Info().
+			Str("arrival", args.ArrivalName).
+			Str("job", jobName).
+			Msg("re-dispatched forensics job (deleted stale + created fresh)")
 	default:
 		return "", fmt.Errorf("create forensics job %s: %w", jobName, err)
 	}
 	return jobName, nil
+}
+
+// deleteJobAndWait removes the existing Job + its child pods (foreground
+// propagation) and blocks until the apiserver confirms it's gone — a
+// subsequent Create otherwise races finalizer cleanup and returns
+// AlreadyExists. Bounded poll (1s ticks, 30s budget). Mirrors the
+// test-runner dispatcher's pattern (internal/dispatch/dispatch.go:169).
+func (d *Dispatcher) deleteJobAndWait(ctx context.Context, namespace, jobName string) error {
+	policy := metav1.DeletePropagationForeground
+	err := d.clients.BatchV1().Jobs(namespace).Delete(ctx, jobName, metav1.DeleteOptions{
+		PropagationPolicy: &policy,
+	})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete: %w", err)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		_, err := d.clients.BatchV1().Jobs(namespace).Get(ctx, jobName, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("poll get: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(1 * time.Second):
+		}
+	}
+	return fmt.Errorf("timeout waiting for job %s to be deleted", jobName)
 }
 
 func (d *Dispatcher) buildJob(args Args, jobName string) *batchv1.Job {
