@@ -269,6 +269,54 @@ func TestFindPreviousVersion_IgnoresSameVersion(t *testing.T) {
 	assert.Empty(t, c.findPreviousVersion(context.Background(), "canary", "0.0.29", now))
 }
 
+// TestFindPreviousVersion_RollbackComparesAgainstChronologicalPredecessor
+// pins the rollback semantics. When the operator rolls back from a Failed
+// v1.5 to v1.4, observer's #143 retest path redeploys v1.4 and triggers a
+// re-test of the existing v1.4 Arrival CR (its spec.deployedAt updates;
+// metadata.creationTimestamp stays at v1.4's original first-deploy time).
+//
+// On the re-test's forensics dispatch, findPreviousVersion must compare
+// v1.4 against its TRUE chronological predecessor (v1.3 here), NOT
+// against the just-failed v1.5. The currentCreated cutoff is v1.4's
+// original creationTimestamp; v1.5 was created later, so it's filtered.
+//
+// This is the semantic the user asked about in the rollback design
+// discussion 2026-05-21: "after a rollback to v1.4, would forensics
+// wrongly compare against v1.5?" Answer pinned here: no, because the
+// creationTimestamp ordering excludes anything newer than v1.4's CR.
+func TestFindPreviousVersion_RollbackComparesAgainstChronologicalPredecessor(t *testing.T) {
+	now := time.Now()
+
+	// v1.3 — Passed, oldest (the true chronological predecessor of v1.4).
+	v13 := newArrival("svc-1-3-jx-staging", "svc", "1.3", PhasePassed, nil)
+	v13.SetCreationTimestamp(metav1.NewTime(now.Add(-72 * time.Hour))) // day 0
+	_ = unstructured.SetNestedField(v13.Object, now.Add(-71*time.Hour).Format(time.RFC3339), "status", "finalizedAt")
+
+	// v1.4 — Passed, the rollback target. Its CR was created day 1 (when
+	// v1.4 first deployed), and is the CURRENT Arrival being re-tested
+	// after the rollback redeploy.
+	v14CreatedAt := now.Add(-48 * time.Hour) // day 1
+	v14 := newArrival("svc-1-4-jx-staging", "svc", "1.4", PhasePassed, nil)
+	v14.SetCreationTimestamp(metav1.NewTime(v14CreatedAt))
+	_ = unstructured.SetNestedField(v14.Object, now.Add(-47*time.Hour).Format(time.RFC3339), "status", "finalizedAt")
+
+	// v1.5 — Failed, the version we just rolled back FROM. Its CR was
+	// created day 2 (after v1.4). MUST be filtered by the creationTimestamp
+	// cutoff or forensics would compare v1.4 against this broken version.
+	v15 := newArrival("svc-1-5-jx-staging", "svc", "1.5", PhaseFailed, nil)
+	v15.SetCreationTimestamp(metav1.NewTime(now.Add(-24 * time.Hour))) // day 2
+	_ = unstructured.SetNestedField(v15.Object, now.Add(-23*time.Hour).Format(time.RFC3339), "status", "finalizedAt")
+
+	c := newTestController(t, v13, v14, v15)
+
+	// Call findPreviousVersion as the controller would on v1.4's re-test —
+	// passing v1.4's *original* creationTimestamp as the cutoff (this is
+	// what GetCreationTimestamp() returns on the rolled-back Arrival CR,
+	// since metadata.creationTimestamp is immutable per K8s spec).
+	prev := c.findPreviousVersion(context.Background(), "svc", "1.4", v14CreatedAt)
+	assert.Equal(t, "1.3", prev, "rollback retest must compare against the chronological predecessor (v1.3), NOT the just-rolled-back-from v1.5")
+}
+
 func TestHandlePending_DispatcherNil_PathExercisesStubFlow(t *testing.T) {
 	// With Dispatcher=nil, handlePending skips the rollout gate AND skips
 	// real Job creation, just flipping straight to Testing.
