@@ -27,6 +27,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/leaderelection"
 
 	"github.com/mikelear/leartech-go-common/pkg/tracing"
 
@@ -157,11 +158,17 @@ func run() error {
 	// independently dispatches + finalizes the same Arrival (#13).
 	// Followers maintain no informer cache — the lease handoff cost
 	// is one full LIST on promotion (~200ms for current Arrival counts).
+	// Leader-election watchdog: liveness reports unhealthy if the leader stops
+	// renewing its lease WITHOUT the process exiting (reads LOCAL elector state,
+	// not the apiserver — avoids the restart-cascade anti-pattern). Wired into
+	// /health/live below.
+	leaderWatchdog := leaderelection.NewLeaderHealthzAdaptor(20 * time.Second)
 	go func() {
 		err := leader.RunLeaderElection(ctx, leader.Config{
 			LeaseName: "leartech-arrivals-observer-leader",
 			Namespace: cfg.WatchNamespace,
 			Client:    kubeClient,
+			WatchDog:  leaderWatchdog,
 		}, func(leaderCtx context.Context) {
 			w, err := watcher.New(leaderCtx, watcher.Config{
 				Namespace:      cfg.WatchNamespace,
@@ -192,6 +199,14 @@ func run() error {
 		if err != nil {
 			log.Error().Err(err).Msg("leader election failed")
 		}
+		// Leadership ended. Unless this is a graceful shutdown (outer ctx done),
+		// exit so K8s restarts the pod and a standby re-acquires the lease —
+		// otherwise the process lingers leaderless, dispatching nothing, while a
+		// static /health/live stays green (the "hung for weeks" bug).
+		if ctx.Err() == nil {
+			log.Error().Msg("leader election ended unexpectedly — exiting for restart")
+			os.Exit(1)
+		}
 	}()
 
 	// Health + metrics HTTP server (K8s probes, Prometheus scrape).
@@ -201,6 +216,7 @@ func run() error {
 	router.Use(middleware.RequestLogger())
 
 	healthHandler := handlers.NewHealthHandler(nil, version)
+	healthHandler.SetLivenessCheck(leaderWatchdog.Check)
 	healthHandler.RegisterRoutes(router)
 	handlers.RegisterMetrics(router)
 

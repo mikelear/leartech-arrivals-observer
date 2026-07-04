@@ -37,6 +37,12 @@ type Config struct {
 	LeaseDuration time.Duration
 	RenewDeadline time.Duration
 	RetryPeriod   time.Duration
+
+	// WatchDog, when set, is wired as the leaderelection WatchDog so a liveness
+	// probe can report unhealthy if the leader stops renewing WITHOUT the process
+	// exiting (client-go LeaderHealthzAdaptor — reads LOCAL elector state, no
+	// apiserver call). See cmd/server/main.go.
+	WatchDog *leaderelection.HealthzAdaptor
 }
 
 // RunLeaderElection blocks, running fn when this pod acquires the
@@ -80,6 +86,7 @@ func RunLeaderElection(ctx context.Context, cfg Config, fn func(ctx context.Cont
 	leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
 		Lock:            lock,
 		ReleaseOnCancel: true,
+		WatchDog:        cfg.WatchDog,
 		LeaseDuration:   cfg.LeaseDuration,
 		RenewDeadline:   cfg.RenewDeadline,
 		RetryPeriod:     cfg.RetryPeriod,

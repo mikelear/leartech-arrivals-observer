@@ -15,11 +15,19 @@ import (
 type HealthHandler struct {
 	pool    *pgxpool.Pool
 	version string
+	// liveness, when set, gates /health/live — e.g. the leader-election watchdog.
+	// A hung/never-renewing leader fails liveness so K8s restarts it.
+	liveness func(*http.Request) error
 }
 
 // NewHealthHandler constructs a HealthHandler.
 func NewHealthHandler(pool *pgxpool.Pool, version string) *HealthHandler {
 	return &HealthHandler{pool: pool, version: version}
+}
+
+// SetLivenessCheck registers an extra liveness gate (e.g. the leader watchdog).
+func (h *HealthHandler) SetLivenessCheck(check func(*http.Request) error) {
+	h.liveness = check
 }
 
 // RegisterRoutes wires the health routes onto the given router. GET and
@@ -40,6 +48,12 @@ func (h *HealthHandler) RegisterRoutes(r gin.IRouter) {
 // @Success 200	{object}	map[string]string
 // @Router /health/live [get]
 func (h *HealthHandler) live(c *gin.Context) {
+	if h.liveness != nil {
+		if err := h.liveness(c.Request); err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unhealthy", "reason": err.Error(), "version": h.version})
+			return
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"status":  "live",
 		"version": h.version,

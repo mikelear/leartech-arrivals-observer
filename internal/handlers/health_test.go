@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -59,3 +60,31 @@ func TestHealthHandler_ReadyShellMode(t *testing.T) {
 		t.Errorf("mode=%q want=shell", body["mode"])
 	}
 }
+
+func TestLive_LivenessGate(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// healthy watchdog → 200
+	h := NewHealthHandler(nil, "test")
+	h.SetLivenessCheck(func(*http.Request) error { return nil })
+	r := gin.New()
+	h.RegisterRoutes(r)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/health/live", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("healthy liveness = %d, want 200", w.Code)
+	}
+
+	// wedged leader (watchdog errors) → 503 so K8s restarts the pod
+	h2 := NewHealthHandler(nil, "test")
+	h2.SetLivenessCheck(func(*http.Request) error { return errStub })
+	r2 := gin.New()
+	h2.RegisterRoutes(r2)
+	w2 := httptest.NewRecorder()
+	r2.ServeHTTP(w2, httptest.NewRequest(http.MethodGet, "/health/live", nil))
+	if w2.Code != http.StatusServiceUnavailable {
+		t.Fatalf("wedged-leader liveness = %d, want 503", w2.Code)
+	}
+}
+
+var errStub = fmt.Errorf("failed election to renew leadership")
