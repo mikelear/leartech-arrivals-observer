@@ -25,9 +25,9 @@ import (
 	"github.com/rs/zerolog/log"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/leaderelection"
 
 	"github.com/mikelear/leartech-go-common/pkg/tracing"
 
