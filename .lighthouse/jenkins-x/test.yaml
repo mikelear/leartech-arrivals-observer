@@ -15,16 +15,17 @@ spec:
           name: ""
           resources: {}
           workingDir: /workspace/source
-          # 12% per-repo floor (below catalog's 60% golden-std). Most of
-          # this codebase is K8s glue (watcher.go, controller.go ≈900 LOC)
-          # which needs fake-clientset infrastructure to unit-test cleanly.
-          # Pure helpers (dispatch path/ref rendering, config loading,
-          # forensics aggregate/compare) are covered. TODO: backfill
-          # watcher + controller tests with k8s.io/client-go/kubernetes/
-          # fake, then raise the threshold in steps toward 60%.
+          # 70% ratcheted floor — matches the Makefile's test-coverage
+          # target. Raised from the historical 12% once the envtest
+          # harness + state-machine conformance + chart-render tests
+          # landed (2026-08 test-harness-parity initiative). ONE-WAY
+          # RATCHET: never lower without an accompanying deliberate
+          # coverage strategy change; the safety property is that a
+          # code change dropping coverage should FAIL the gate rather
+          # than silently regress. Keep in sync with Makefile.
           env:
           - name: COVERAGE_THRESHOLD
-            value: "12.0"
+            value: "70.0"
         steps:
         - name: ""
           resources: {}
