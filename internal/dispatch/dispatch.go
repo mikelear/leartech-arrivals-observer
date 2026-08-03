@@ -81,10 +81,15 @@ type Config struct {
 	PostDeployPathTemplate string
 }
 
-// Test describes one test-pack to dispatch.
+// Test describes one test-pack to dispatch. Per-pack Resources + Env
+// (optional; pointer for Resources so we can distinguish "unset" from
+// "explicit empty") override the service-level equivalents in
+// buildJob's precedence chain — see resolveResources + resolveEnv.
 type Test struct {
-	PackName string // e.g. "end2end-ui"
-	PackType string // e.g. "end2end-ui"
+	PackName  string // e.g. "end2end-ui"
+	PackType  string // e.g. "end2end-ui"
+	Resources *corev1.ResourceRequirements
+	Env       []corev1.EnvVar
 }
 
 // Args bundles the per-arrival fields needed to render a Job.
@@ -100,6 +105,13 @@ type Args struct {
 	// Appended to the Job's env after the standard set; literal
 	// values + secretKeyRef both supported (corev1.EnvVar shape).
 	Env []corev1.EnvVar
+
+	// ServiceResources (optional) is the per-service Resources
+	// override threaded through from chart values.services[<name>].resources
+	// via the Arrival CR spec.resources. When set, overrides the
+	// dispatch.Config global default; overridden in turn by any
+	// per-pack Test.Resources set. Nil = fall back to Config.Resources.
+	ServiceResources *corev1.ResourceRequirements
 }
 
 // Dispatcher creates Jobs.
@@ -279,29 +291,15 @@ func (d *Dispatcher) buildJob(args Args, t Test, jobName string) (*batchv1.Job, 
 			},
 		},
 	}
-	envVars := make([]corev1.EnvVar, 0, len(standardEnv)+len(args.Env))
-	envVars = append(envVars, standardEnv...)
-	// Append per-service env (HYDRA_ADMIN_URL, USER_EMAIL, etc.) so
-	// test specs can read them via process.env.X. Append AFTER the
-	// standard set so per-service overrides effectively layer on top
-	// (last value wins for duplicates per K8s semantics).
-	envVars = append(envVars, args.Env...)
+	// Layer env: standard → service (args.Env) → pack (t.Env). Last
+	// value wins for duplicate names per K8s semantics — an intentional
+	// hook so a heavy pack can override e.g. PLAYWRIGHT_WORKERS without
+	// touching every other pack.
+	envVars := resolveEnv(standardEnv, args.Env, t.Env)
 
-	resources := d.cfg.Resources
-	if len(resources.Requests) == 0 && len(resources.Limits) == 0 {
-		// Defensive default — chart should always set these but if running
-		// outside Helm (e.g. unit tests) we still want sane values.
-		resources = corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("250m"),
-				corev1.ResourceMemory: resource.MustParse("512Mi"),
-			},
-			Limits: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("1500m"),
-				corev1.ResourceMemory: resource.MustParse("2Gi"),
-			},
-		}
-	}
+	// Resolve resources with precedence pack > service > global > defensive
+	// fallback. Isolated in a helper so unit tests can pin each rung.
+	resources := resolveResources(t.Resources, args.ServiceResources, d.cfg.Resources)
 
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -401,6 +399,64 @@ func ParseResources(jsonStr string) (corev1.ResourceRequirements, error) {
 		return out, fmt.Errorf("parse resources JSON: %w", err)
 	}
 	return out, nil
+}
+
+// resolveResources implements the precedence chain
+//
+//	pack > service > global > defensive-hardcoded-fallback
+//
+// A nil pointer means "not set at that rung, defer to the next". The
+// global rung (dispatch.Config.Resources) is a value, not a pointer, so
+// treat an all-empty Requests+Limits struct as "not set" and fall
+// through to the defensive default. The defensive default is only
+// exercised in unit tests + smoke deploys — Helm always sets Config.
+func resolveResources(pack, service *corev1.ResourceRequirements, global corev1.ResourceRequirements) corev1.ResourceRequirements {
+	if pack != nil && !isResourcesEmpty(*pack) {
+		return *pack
+	}
+	if service != nil && !isResourcesEmpty(*service) {
+		return *service
+	}
+	if !isResourcesEmpty(global) {
+		return global
+	}
+	return corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("250m"),
+			corev1.ResourceMemory: resource.MustParse("512Mi"),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("1500m"),
+			corev1.ResourceMemory: resource.MustParse("2Gi"),
+		},
+	}
+}
+
+// isResourcesEmpty is true when neither Requests nor Limits carry any
+// values. Callers use it to distinguish "unset" from "explicitly set to
+// empty" — the latter isn't a user-meaningful state but the former is
+// (means: skip this rung of the precedence chain).
+func isResourcesEmpty(r corev1.ResourceRequirements) bool {
+	return len(r.Requests) == 0 && len(r.Limits) == 0
+}
+
+// resolveEnv layers env slices in append-order — the K8s pod env
+// deduplication rule ("last wins for duplicate names") is what makes
+// the layering meaningful: later slices effectively override earlier
+// ones for shared keys. Caller passes in whatever layering it wants;
+// this helper just concatenates. Nil / empty slices are no-ops.
+//
+// Standard call order in buildJob: standard → service → pack.
+func resolveEnv(layers ...[]corev1.EnvVar) []corev1.EnvVar {
+	total := 0
+	for _, l := range layers {
+		total += len(l)
+	}
+	out := make([]corev1.EnvVar, 0, total)
+	for _, l := range layers {
+		out = append(out, l...)
+	}
+	return out
 }
 
 // runnerScript is the inline bash that runs inside the Job container.

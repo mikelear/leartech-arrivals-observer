@@ -123,12 +123,86 @@ affinity: {}
 # Skipped (recorded but not tested). Override per-cluster from
 # `helmfiles/jx-staging/configs/leartech-arrivals-observer.yaml`.
 #
-# Example:
+# Per-service fields:
+#   stagingUrl (string) — base URL health-probed + passed as STAGING_URL
+#   testPacks (list)    — packs to dispatch, each {name, type,
+#                         resources?, env?}
+#   env (list)          — corev1.EnvVar list, service-wide (layered ABOVE
+#                         standard env in the runner Job)
+#   resources (object)  — corev1.ResourceRequirements, service-wide
+#                         override of the global default. Overridden per-pack
+#                         by testPacks[].resources.
+#
+# Per-pack fields (inside testPacks[]):
+#   name, type          — as before
+#   resources (object)  — optional per-pack Resources override. Precedence
+#                         at Job build: pack.resources > service.resources >
+#                         DISPATCH_RESOURCES_JSON global default.
+#   env (list)          — optional per-pack env vars appended AFTER
+#                         service env in the Job (last-wins on name
+#                         collisions).
+#
+# Minimal example:
 #   services:
 #     leartech-qa-canary:
 #       stagingUrl: https://leartech-qa-canary.jx.leartech.com
 #       testPacks:
 #         - { name: smoke, type: end2end }
+#
+# Full example — service-wide env + per-pack heavy override:
+#   services:
+#     leartech-portal:
+#       stagingUrl: https://leartech-portal-jx-staging.gcp.leartech.com
+#       resources:                     # applied to every pack under this service
+#         requests: { cpu: 500m, memory: 1Gi }
+#         limits:   { cpu: 2, memory: 4Gi }
+#       env:                           # signed-in personas, service-wide
+#         - name: USER_EMAIL
+#           valueFrom:
+#             secretKeyRef:
+#               name: auth-service-test-users
+#               key: user_email
+#               optional: true
+#         - name: USER_PASSWORD
+#           valueFrom:
+#             secretKeyRef:
+#               name: auth-service-test-users
+#               key: user_password
+#               optional: true
+#       testPacks:
+#         - name: smoke
+#           type: end2end               # uses service.resources + service.env
+#         - name: end2end-ui
+#           type: end2end-ui
+#           resources:                  # heavy Playwright + Chromium workers
+#             requests: { cpu: 1500m, memory: 3Gi }
+#             limits:   { cpu: 3,     memory: 6Gi }
+#           env:
+#             - { name: PLAYWRIGHT_WORKERS, value: "2" }
+#
+# Reusable auth-personas services-map snippet — YAML anchors work across
+# a single overlay values.yaml (Helm-supported). Prefer this when several
+# services all want the same USER_*/PLATFORM_ADMIN_* set:
+#
+#   _authPersonas: &authPersonas
+#     - name: USER_EMAIL
+#       valueFrom: { secretKeyRef: { name: auth-service-test-users, key: user_email, optional: true } }
+#     - name: USER_PASSWORD
+#       valueFrom: { secretKeyRef: { name: auth-service-test-users, key: user_password, optional: true } }
+#     - name: PLATFORM_ADMIN_EMAIL
+#       valueFrom: { secretKeyRef: { name: auth-service-test-users, key: platform_admin_email, optional: true } }
+#     - name: PLATFORM_ADMIN_PASSWORD
+#       valueFrom: { secretKeyRef: { name: auth-service-test-users, key: platform_admin_password, optional: true } }
+#
+#   services:
+#     leartech-auth-ui:
+#       env: *authPersonas
+#     leartech-portal:
+#       env: *authPersonas
+#
+# For template consumers that want the same bundle without YAML anchors,
+# the chart also exposes `leartech.authPersonasEnvVars` (see
+# templates/_env-personas.tpl).
 services: {}
 
 # Test dispatch tunables. timeoutMinutes is wall-clock per Arrival; once

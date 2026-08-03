@@ -233,9 +233,9 @@ func (w *Watcher) upsertArrival(ctx context.Context, rs *appsv1.ReplicaSet, arri
 		}
 	}
 	if hasCfg && len(svcCfg.TestPacks) > 0 {
-		packs := make([]any, 0, len(svcCfg.TestPacks))
-		for _, p := range svcCfg.TestPacks {
-			packs = append(packs, map[string]any{"name": p.Name, "type": p.Type})
+		packs, err := testPacksToSlice(svcCfg.TestPacks)
+		if err != nil {
+			return fmt.Errorf("encode testPacks: %w", err)
 		}
 		if err := unstructured.SetNestedSlice(cr.Object, packs, "spec", "testPacks"); err != nil {
 			return err
@@ -251,6 +251,17 @@ func (w *Watcher) upsertArrival(ctx context.Context, rs *appsv1.ReplicaSet, arri
 			return fmt.Errorf("encode env: %w", err)
 		}
 		if err := unstructured.SetNestedSlice(cr.Object, envSlice, "spec", "env"); err != nil {
+			return err
+		}
+	}
+	// Per-service Resources override (optional pointer). Marshal via
+	// JSON so quantity values (e.g. "512Mi") round-trip as strings.
+	if hasCfg && svcCfg.Resources != nil {
+		resMap, err := resourceRequirementsToMap(svcCfg.Resources)
+		if err != nil {
+			return fmt.Errorf("encode resources: %w", err)
+		}
+		if err := unstructured.SetNestedMap(cr.Object, resMap, "spec", "resources"); err != nil {
 			return err
 		}
 	}
@@ -276,9 +287,9 @@ func (w *Watcher) upsertArrival(ctx context.Context, rs *appsv1.ReplicaSet, arri
 		patchObj["spec"].(map[string]any)["stagingUrl"] = svcCfg.StagingURL
 	}
 	if hasCfg && len(svcCfg.TestPacks) > 0 {
-		packs := make([]map[string]any, 0, len(svcCfg.TestPacks))
-		for _, p := range svcCfg.TestPacks {
-			packs = append(packs, map[string]any{"name": p.Name, "type": p.Type})
+		packs, err := testPacksToSlice(svcCfg.TestPacks)
+		if err != nil {
+			return fmt.Errorf("encode testPacks (patch): %w", err)
 		}
 		patchObj["spec"].(map[string]any)["testPacks"] = packs
 	}
@@ -288,6 +299,13 @@ func (w *Watcher) upsertArrival(ctx context.Context, rs *appsv1.ReplicaSet, arri
 			return fmt.Errorf("encode env (patch): %w", err)
 		}
 		patchObj["spec"].(map[string]any)["env"] = envSlice
+	}
+	if hasCfg && svcCfg.Resources != nil {
+		resMap, err := resourceRequirementsToMap(svcCfg.Resources)
+		if err != nil {
+			return fmt.Errorf("encode resources (patch): %w", err)
+		}
+		patchObj["spec"].(map[string]any)["resources"] = resMap
 	}
 	patch, err := json.Marshal(patchObj)
 	if err != nil {
@@ -312,6 +330,45 @@ func envVarsToSlice(envs []corev1.EnvVar) ([]any, error) {
 		return nil, err
 	}
 	var out []any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// testPacksToSlice converts []config.TestPack (name+type+optional
+// Resources+Env) into a []any usable by unstructured.SetNestedSlice.
+// JSON round-trip so both the resource-quantity Quantity type + the
+// EnvVar valueFrom.secretKeyRef shape flow through unchanged.
+func testPacksToSlice(packs []config.TestPack) ([]any, error) {
+	if len(packs) == 0 {
+		return nil, nil
+	}
+	raw, err := json.Marshal(packs)
+	if err != nil {
+		return nil, err
+	}
+	var out []any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// resourceRequirementsToMap round-trips corev1.ResourceRequirements
+// via JSON to a map[string]any usable by unstructured.SetNestedMap.
+// Quantity marshals to a string (e.g. "512Mi") in JSON, which K8s
+// deserialises back to a Quantity on the way out — no special handling
+// needed in either direction.
+func resourceRequirementsToMap(r *corev1.ResourceRequirements) (map[string]any, error) {
+	if r == nil {
+		return nil, nil
+	}
+	raw, err := json.Marshal(r)
+	if err != nil {
+		return nil, err
+	}
+	var out map[string]any
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, err
 	}

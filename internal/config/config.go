@@ -13,9 +13,24 @@ import (
 
 // TestPack is one entry in services[<name>].testPacks — name + type pair
 // that the dispatcher will create a Job for.
+//
+// Resources (optional, pointer so we can distinguish "unset" from
+// "explicit empty") overrides the service-level + global default when
+// dispatching this pack — e.g. a heavy Playwright end2end-ui pack that
+// spawns multiple Chromium workers can ask for more memory + CPU
+// without inflating the request for lighter smoke packs on the same
+// service.
+//
+// Env (optional) layers on top of the service-level Env. Merge order in
+// the dispatched Job is: standard env → service.Env → pack.Env (last
+// wins for name collisions per K8s semantics). Useful for pack-specific
+// tuning (e.g. PLAYWRIGHT_WORKERS=1 on the heavy pack) without
+// polluting every other pack's env.
 type TestPack struct {
-	Name string `json:"name"`
-	Type string `json:"type"`
+	Name      string                       `json:"name"`
+	Type      string                       `json:"type"`
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+	Env       []corev1.EnvVar              `json:"env,omitempty"`
 }
 
 // ServiceConfig is the per-service dispatch configuration that the watcher
@@ -27,10 +42,18 @@ type TestPack struct {
 // thread per-cluster config into test specs (e.g. HYDRA_ADMIN_URL,
 // USER_EMAIL/PASSWORD from a k8s Secret) without rebuilding the test
 // runner image. Tests read via process.env.<NAME>.
+//
+// Resources (optional, pointer) overrides the observer's global
+// DISPATCH_RESOURCES_JSON default for every pack dispatched under this
+// service. Precedence at Job-build time: pack.Resources > service.Resources
+// > global default (dispatch.Config.Resources) > defensive hardcoded
+// fallback. Set this when an entire service (all its packs) needs
+// more room than the observer's global default provides.
 type ServiceConfig struct {
-	StagingURL string          `json:"stagingUrl"`
-	TestPacks  []TestPack      `json:"testPacks"`
-	Env        []corev1.EnvVar `json:"env,omitempty"`
+	StagingURL string                       `json:"stagingUrl"`
+	TestPacks  []TestPack                   `json:"testPacks"`
+	Env        []corev1.EnvVar              `json:"env,omitempty"`
+	Resources  *corev1.ResourceRequirements `json:"resources,omitempty"`
 }
 
 // Config is the envconfig-populated runtime configuration.

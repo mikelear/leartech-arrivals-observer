@@ -352,3 +352,88 @@ func TestHandlePending_DecodesEnvFromSpec(t *testing.T) {
 // Smoke check that the corev1 import is exercised (linters otherwise
 // flag the import as unused if every reference is behind a helper).
 var _ = corev1.EnvVar{}
+
+// TestDecodeResources_HappyPath exercises the unstructured→typed
+// conversion the handlePending path uses to pull service-level +
+// per-pack resources out of the Arrival CR. Quantity strings round-trip
+// through the JSON layer without needing hand-parsing.
+func TestDecodeResources_HappyPath(t *testing.T) {
+	raw := map[string]any{
+		"requests": map[string]any{"cpu": "500m", "memory": "1Gi"},
+		"limits":   map[string]any{"memory": "4Gi"},
+	}
+	got := decodeResources(raw)
+	require.NotNil(t, got)
+	assert.Equal(t, "500m", got.Requests.Cpu().String())
+	assert.Equal(t, "1Gi", got.Requests.Memory().String())
+	assert.Equal(t, "4Gi", got.Limits.Memory().String())
+}
+
+// TestDecodeResources_EmptyReturnsNil ensures "not set on CR" produces
+// nil at the Go layer. The precedence chain relies on nil → defer to
+// next rung; a zero-value struct would silently short-circuit that.
+func TestDecodeResources_EmptyReturnsNil(t *testing.T) {
+	assert.Nil(t, decodeResources(nil))
+	assert.Nil(t, decodeResources(map[string]any{}))
+	// Explicit-but-all-zero → nil too, so a service that wrote resources: {} in
+	// values.yaml doesn't silently override lower rungs.
+	assert.Nil(t, decodeResources(map[string]any{
+		"requests": map[string]any{},
+		"limits":   map[string]any{},
+	}))
+}
+
+// TestHandlePending_DecodesServiceResourcesFromSpec confirms the
+// service-level Resources block round-trips: CR spec.resources → decoded
+// via handlePending → passed on Dispatcher.Args.ServiceResources.
+// The Dispatcher is nil here (stub path), but the decode-side test
+// exercises the field without needing a full dispatch mock. A more
+// elaborate wiring test would use a Dispatcher fake — the precedence
+// tests in dispatch/precedence_test.go cover that end already.
+func TestHandlePending_DecodesServiceResourcesFromSpec(t *testing.T) {
+	packs := []map[string]any{{"name": "smoke", "type": "smoke"}}
+	arr := newArrival("a", "svc", "0.1.0", "", packs)
+	_ = unstructured.SetNestedMap(arr.Object, map[string]any{
+		"requests": map[string]any{"memory": "1Gi"},
+	}, "spec", "resources")
+
+	c := newTestController(t, arr)
+	c.handlePending(context.Background(), arr)
+
+	got, _ := c.dynamic.Resource(arrivalGVR).Namespace("jx-staging").Get(context.Background(), "a", metav1.GetOptions{})
+	phase, _, _ := unstructured.NestedString(got.Object, "status", "phase")
+	assert.Equal(t, PhaseTesting, phase, "decode of spec.resources must not block dispatch")
+}
+
+// TestHandlePending_DecodesPerPackResourcesAndEnv exercises the
+// per-pack decode path. Same shape a chart's SERVICES_JSON would emit
+// when a pack sets its own Resources/Env.
+func TestHandlePending_DecodesPerPackResourcesAndEnv(t *testing.T) {
+	packs := []map[string]any{
+		{"name": "smoke", "type": "end2end"},
+		{
+			"name": "heavy",
+			"type": "end2end-ui",
+			"resources": map[string]any{
+				"requests": map[string]any{"memory": "3Gi"},
+			},
+			"env": []any{
+				map[string]any{"name": "PLAYWRIGHT_WORKERS", "value": "2"},
+			},
+		},
+	}
+	arr := newArrival("a", "svc", "0.1.0", "", packs)
+	c := newTestController(t, arr)
+
+	c.handlePending(context.Background(), arr)
+
+	got, _ := c.dynamic.Resource(arrivalGVR).Namespace("jx-staging").Get(context.Background(), "a", metav1.GetOptions{})
+	phase, _, _ := unstructured.NestedString(got.Object, "status", "phase")
+	assert.Equal(t, PhaseTesting, phase, "per-pack resources/env decode must not block dispatch")
+
+	// Status.tests must record both packs by name — the controller doesn't
+	// need to write per-pack resources into status, but the count acts as
+	// a regression guard against decode losing a pack.
+	tests, _, _ := unstructured.NestedSlice(got.Object, "status", "tests")
+	assert.Len(t, tests, 2)
+}

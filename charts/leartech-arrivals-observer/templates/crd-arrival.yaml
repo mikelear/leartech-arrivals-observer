@@ -70,14 +70,33 @@ spec:
               testPacks:
                 type: array
                 description: Test packs to run on this arrival (set from chart values.services[<name>].testPacks)
+                # Schema-tolerant on each pack — preserve-unknown-fields lets
+                # per-pack resources (corev1.ResourceRequirements) + env
+                # (corev1.EnvVar) flow through without parallel CRD maintenance
+                # for every new sub-field K8s adds to those shapes (e.g.
+                # ResourceClaim, ResizePolicy, or new EnvVarSource variants).
                 items:
                   type: object
                   required: [name, type]
+                  x-kubernetes-preserve-unknown-fields: true
                   properties:
                     name: { type: string }
                     type:
                       type: string
                       enum: [end2end, end2end-ui, contract, unit, load]
+                    resources:
+                      type: object
+                      description: "Optional per-pack resource requests/limits (corev1.ResourceRequirements). Overrides service.resources + global default. Precedence: pack > service > global."
+                      x-kubernetes-preserve-unknown-fields: true
+                    env:
+                      type: array
+                      description: "Optional per-pack env vars appended on top of service.env in the dispatched Job. corev1.EnvVar shape (literal or secretKeyRef)."
+                      x-kubernetes-preserve-unknown-fields: true
+                      items:
+                        type: object
+                        required: [name]
+                        properties:
+                          name: { type: string }
               env:
                 type: array
                 description: "Per-service env vars injected into the dispatched test Job (corev1.EnvVar shape). Set from chart values.services[<name>].env. Used to thread per-cluster config (HYDRA_ADMIN_URL, USER_EMAIL/PASSWORD from k8s Secret) into test specs without rebuilding the runner image."
@@ -90,6 +109,10 @@ spec:
                   required: [name]
                   properties:
                     name: { type: string }
+              resources:
+                type: object
+                description: "Optional per-service resource requests/limits (corev1.ResourceRequirements) applied to every pack dispatched under this service. Overridden by pack.resources when a pack sets its own."
+                x-kubernetes-preserve-unknown-fields: true
           status:
             type: object
             x-kubernetes-preserve-unknown-fields: true
