@@ -1,0 +1,39 @@
+{{- /*
+Grafana dashboard as ConfigMap — discovered by the JX Grafana sidecar.
+
+MIRRORS the leartech-automated-agent's proven pattern:
+  - Label `jenkins-x.io/grafana-dashboard: "1"` (NOT `grafana_dashboard` —
+    the JX sidecar reads jenkins-x.io/*, whereas the vanilla kube-prom
+    sidecar reads grafana_dashboard=1; picking the wrong one is silent).
+  - Annotation `grafana_folder: "<folder>"` selects the Grafana folder
+    the imported dashboard lands in.
+  - Datasource UID `loki` (matches every Leartech cluster's Grafana
+    provisioned datasource; NOT a hard-coded UUID which would drift).
+
+The dashboard body is `.Files.Get`'d from files/grafana/... so we can
+edit the JSON as JSON (validated by `jq empty`) rather than embedding
+it as an escaped Helm string. Empty-file guard on Files.Get so a chart
+without the file doesn't render an empty ConfigMap.
+*/}}
+{{- if .Values.grafana.dashboard.enabled }}
+{{- $body := .Files.Get "files/grafana/arrivals-observer-dashboard.json" }}
+{{- if $body }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "leartech.fullname" . }}-dashboard
+  labels:
+    {{- include "leartech.labels" . | nindent 4 }}
+    # JX3 Grafana sidecar discovery key. Value "1" is a string (all
+    # label values are strings in K8s). MUST match this exact key —
+    # `grafana_dashboard: "1"` is the vanilla kube-prometheus-stack
+    # convention and the JX sidecar ignores it.
+    jenkins-x.io/grafana-dashboard: "1"
+  annotations:
+    # Which Grafana folder the sidecar drops the dashboard into.
+    grafana_folder: {{ .Values.grafana.dashboard.folder | quote }}
+data:
+  arrivals-observer.json: |-
+{{ $body | indent 4 }}
+{{- end }}
+{{- end }}

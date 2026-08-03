@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 	"k8s.io/client-go/kubernetes"
@@ -37,6 +36,7 @@ import (
 	"github.com/mikelear/leartech-arrivals-observer/internal/forensics"
 	"github.com/mikelear/leartech-arrivals-observer/internal/handlers"
 	"github.com/mikelear/leartech-arrivals-observer/internal/leader"
+	"github.com/mikelear/leartech-arrivals-observer/internal/logging"
 	"github.com/mikelear/leartech-arrivals-observer/internal/middleware"
 	"github.com/mikelear/leartech-arrivals-observer/internal/watcher"
 )
@@ -45,8 +45,10 @@ import (
 var version = "dev"
 
 func main() {
-	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
-	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
+	// Bootstrap logger before Load() so config errors are properly
+	// formatted. cluster is filled from env if present; the real
+	// cluster comes from cfg.ClusterID a moment later.
+	logging.Init("leartech-arrivals-observer", version, os.Getenv("CLUSTER_ID"))
 
 	if err := run(); err != nil {
 		log.Fatal().Err(err).Msg("observer failed")
@@ -59,14 +61,21 @@ func run() error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
+	// Re-init once we know the config-time cluster (kept identical to
+	// the bootstrap value in production; the second call handles
+	// tests where cfg overrides env).
+	format := logging.Init("leartech-arrivals-observer", version, cfg.ClusterID)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	log.Info().
+		Str("event", "observer_boot").
 		Str("version", version).
 		Str("clusterID", cfg.ClusterID).
 		Str("watchNamespace", cfg.WatchNamespace).
 		Str("port", cfg.Port).
+		Str("logFormat", string(format)).
 		Msg("starting leartech-arrivals-observer")
 
 	shutdownTracer, err := tracing.Init(ctx, "leartech-arrivals-observer", version, cfg.ClusterID)

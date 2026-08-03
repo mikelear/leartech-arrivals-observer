@@ -56,6 +56,24 @@ crd:
 config:
   cluster: ""  # "gcp" | "az" — set from .Values.global or env-specific
   logLevel: info
+  # LOG_FORMAT toggle — "json" (in-cluster, Loki-queryable) vs any other
+  # value (console, dev-local). Every record gets service/version/cluster
+  # ambient fields; per-arrival records add event=, arrival=, pack=,
+  # phase= so Loki filters work end-to-end. Set to "" in the dev
+  # `preview/` helmfile if you want console output on a preview.
+  logFormat: json
+
+# Grafana dashboard as a ConfigMap — discovered by the JX Grafana
+# sidecar via the `jenkins-x.io/grafana-dashboard: "1"` label. Mirrors
+# the automated-agent's proven pattern. Set enabled: false on clusters
+# without a Grafana instance or where you want to skip installing.
+grafana:
+  dashboard:
+    enabled: true
+    # Grafana folder the dashboard lands in. "Leartech Agents" pairs
+    # nicely with the automated-agent dashboards; "Leartech QA" gives
+    # a dedicated home when the QA surface grows. Either works.
+    folder: "Leartech QA"
 
 # OpenTelemetry traces — emitted via OTLP HTTP to the cluster's Tempo.
 # Default endpoint resolves on both GCP and AZ clusters (same service name

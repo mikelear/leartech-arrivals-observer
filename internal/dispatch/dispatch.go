@@ -461,10 +461,54 @@ func resolveEnv(layers ...[]corev1.EnvVar) []corev1.EnvVar {
 
 // runnerScript is the inline bash that runs inside the Job container.
 // Reads env, clones, waits, runs the test pack, uploads results.
+//
+// Log durability: stdout+stderr are teed to /tmp/logs.jsonl for the
+// entire run so, after the pod is GC'd (K8s reaps completed Job pods
+// after ttlSecondsAfterFinished), the log survives at
+// gs://<bucket>/<prefix>/logs.jsonl. Each line is prefixed with an
+// RFC3339 timestamp and the arrival/service/pack/version identifiers
+// so a single line stands alone in a Loki-imported JSON view — mirrors
+// the "survives pod GC" pattern the automated-agent dashboards use for
+// agent pods.
 const runnerScript = `set -euo pipefail
-echo "==> arrival=$ARRIVAL_NAME service=$SERVICE version=$VERSION pack=$TEST_PACK type=$TEST_PACK_TYPE"
-echo "==> stagingUrl=$STAGING_URL cluster=$CLUSTER_ID namespace=$NAMESPACE bucket=$RESULT_STORE_BUCKET"
-echo "==> resultPathPrefix=$RESULT_STORE_PATH_PREFIX"
+
+LOG_PATH=/tmp/logs.jsonl
+: > "$LOG_PATH"
+# log_json <level> <event> [key=value ...]
+# Emits one JSON line to both the pod's stdout (kubectl logs) and the
+# durable $LOG_PATH which is later uploaded. Uses printf to escape
+# quotes in values; the schema mirrors the observer's own JSON log
+# shape (timestamp, level, event, service, version, pack, arrival, msg).
+log_json() {
+  local level="$1"; shift
+  local event="$1"; shift
+  local msg=""
+  local kv=""
+  for arg in "$@"; do
+    case "$arg" in
+      msg=*) msg="${arg#msg=}" ;;
+      *) kv="$kv,\"${arg%%=*}\":\"${arg#*=}\"" ;;
+    esac
+  done
+  local now
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '{"time":"%s","level":"%s","event":"%s","service":"%s","version":"%s","pack":"%s","arrival":"%s","cluster":"%s","msg":"%s"%s}\n' \
+    "$now" "$level" "$event" "${SERVICE:-}" "${VERSION:-}" "${TEST_PACK:-}" "${ARRIVAL_NAME:-}" "${CLUSTER_ID:-}" "$msg" "$kv" \
+    | tee -a "$LOG_PATH"
+}
+
+log_json info pack_runner_start \
+  msg="pack runner started" \
+  stagingUrl="${STAGING_URL:-}" \
+  packType="${TEST_PACK_TYPE:-}"
+echo "==> arrival=$ARRIVAL_NAME service=$SERVICE version=$VERSION pack=$TEST_PACK type=$TEST_PACK_TYPE" | tee -a "$LOG_PATH"
+echo "==> stagingUrl=$STAGING_URL cluster=$CLUSTER_ID namespace=$NAMESPACE bucket=$RESULT_STORE_BUCKET" | tee -a "$LOG_PATH"
+echo "==> resultPathPrefix=$RESULT_STORE_PATH_PREFIX" | tee -a "$LOG_PATH"
+
+# From this point on, every stdout+stderr line is also captured to $LOG_PATH.
+# The exec redirection remains for the lifetime of the script; the final
+# upload step reads the file back before the container exits.
+exec > >(tee -a "$LOG_PATH") 2>&1
 
 WORK=/tmp/work
 mkdir -p "$WORK" && cd "$WORK"
@@ -597,6 +641,20 @@ if [ "$TEST_PACK_TYPE" = "end2end" ] && [ "$TEST_EXIT" -eq 0 ] && [ -f results.j
   fi
 fi
 
+# Durable pack-job logs. Uploaded LAST so it captures everything the
+# script emitted, including the results.json upload above. Even when
+# TEST_EXIT != 0 the log lands, so "why did this pack fail" is
+# debuggable long after K8s reaps the pod.
+log_json info pack_runner_done \
+  msg="pack runner finished" \
+  testExit="$TEST_EXIT"
+if [ -f "$LOG_PATH" ]; then
+  # Best-effort — a log-upload failure never masks the test verdict
+  # (we still exit with $TEST_EXIT below).
+  gsutil cp "$LOG_PATH" "${DEST_PREFIX}/logs.jsonl" 2>/dev/null || \
+    echo "::WARN logs.jsonl upload failed (bucket=${DEST_PREFIX})"
+fi
+
 echo "==> done; test exit code=${TEST_EXIT}"
 exit $TEST_EXIT
 `
@@ -714,4 +772,37 @@ func (d *Dispatcher) GetStatus(ctx context.Context, namespace, jobName string) (
 		return JobFailed, nil
 	}
 	return JobRunning, nil
+}
+
+// GetFailureReason returns the termination reason of the newest failed
+// pod owned by the Job (e.g. "OOMKilled", "Error", "DeadlineExceeded").
+// Returns empty string when the Job has no failed pods or the pod
+// hasn't reported a terminated state yet — callers treat "" as "no
+// signal, don't classify".
+//
+// Used by the controller's OOM metric — see metrics.IsOOMReason. The
+// method is on *Dispatcher (not a package-level func) so tests can
+// swap in a fake Dispatcher that returns a synthetic reason without
+// standing up a full K8s fixture.
+func (d *Dispatcher) GetFailureReason(ctx context.Context, namespace, jobName string) (string, error) {
+	pods, err := d.clients.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("job-name=%s", jobName),
+	})
+	if err != nil {
+		return "", err
+	}
+	// Walk containerStatuses on every pod; return the first non-empty
+	// terminated.reason. There's typically exactly one pod (RestartPolicy
+	// = Never, BackoffLimit = 0) but tolerate more.
+	for _, pod := range pods.Items {
+		for _, cs := range pod.Status.ContainerStatuses {
+			if cs.State.Terminated != nil && cs.State.Terminated.Reason != "" {
+				return cs.State.Terminated.Reason, nil
+			}
+			if cs.LastTerminationState.Terminated != nil && cs.LastTerminationState.Terminated.Reason != "" {
+				return cs.LastTerminationState.Terminated.Reason, nil
+			}
+		}
+	}
+	return "", nil
 }
