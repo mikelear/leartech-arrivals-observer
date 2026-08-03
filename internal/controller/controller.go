@@ -273,6 +273,7 @@ func (c *Controller) handlePending(ctx context.Context, u *unstructured.Unstruct
 	service, _, _ := unstructured.NestedString(u.Object, "spec", "service")
 	version, _, _ := unstructured.NestedString(u.Object, "spec", "version")
 	envSpec, _, _ := unstructured.NestedSlice(u.Object, "spec", "env")
+	serviceResSpec, _, _ := unstructured.NestedMap(u.Object, "spec", "resources")
 
 	if len(packs) == 0 {
 		log.Info().Str("arrival", name).Msg("no test packs configured → Skipped")
@@ -308,17 +309,27 @@ func (c *Controller) handlePending(ctx context.Context, u *unstructured.Unstruct
 	c.inFlight[name] = time.Now()
 	c.mu.Unlock()
 
-	// Build Test list for the dispatcher.
+	// Build Test list for the dispatcher. Per-pack Resources + Env
+	// decoded here (both optional — nil / empty when unset on the pack).
+	// Decode failures don't block dispatch; the pack falls back to the
+	// service / global defaults via resolveResources' precedence chain.
 	tests := make([]dispatch.Test, 0, len(packs))
 	for _, p := range packs {
 		pm, ok := p.(map[string]any)
 		if !ok {
 			continue
 		}
-		tests = append(tests, dispatch.Test{
+		t := dispatch.Test{
 			PackName: asString(pm["name"]),
 			PackType: asString(pm["type"]),
-		})
+		}
+		if resMap, ok := pm["resources"].(map[string]any); ok && len(resMap) > 0 {
+			t.Resources = decodeResources(resMap)
+		}
+		if envRaw, ok := pm["env"].([]any); ok && len(envRaw) > 0 {
+			t.Env = decodeEnvVars(envRaw)
+		}
+		tests = append(tests, t)
 	}
 
 	// Decode per-service env injection from spec.env (corev1.EnvVar
@@ -326,6 +337,7 @@ func (c *Controller) handlePending(ctx context.Context, u *unstructured.Unstruct
 	// Failures here are logged + dropped — don't block dispatch on a
 	// malformed env entry; tests may still pass with defaults.
 	env := decodeEnvVars(envSpec)
+	serviceRes := decodeResources(serviceResSpec)
 
 	// Gate test dispatch on Deployment rollout completion. Without this
 	// tests run during the K8s rolling-update window and observe a
@@ -353,12 +365,13 @@ func (c *Controller) handlePending(ctx context.Context, u *unstructured.Unstruct
 	if c.cfg.Dispatcher != nil {
 		var err error
 		jobNames, err = c.cfg.Dispatcher.Dispatch(ctx, dispatch.Args{
-			ArrivalName: name,
-			Namespace:   c.cfg.Namespace,
-			Service:     service,
-			Version:     version,
-			StagingURL:  stagingURL,
-			Env:         env,
+			ArrivalName:      name,
+			Namespace:        c.cfg.Namespace,
+			Service:          service,
+			Version:          version,
+			StagingURL:       stagingURL,
+			Env:              env,
+			ServiceResources: serviceRes,
 		}, tests)
 		if err != nil {
 			log.Error().Err(err).Str("arrival", name).Msg("dispatch failed; arrival → Failed")
@@ -570,6 +583,36 @@ func decodeEnvVars(raw []any) []corev1.EnvVar {
 		return nil
 	}
 	return out
+}
+
+// decodeResources converts an unstructured-shaped resources map
+// (from CR spec.resources or spec.testPacks[].resources) back into a
+// typed *corev1.ResourceRequirements. Pointer return so callers can
+// distinguish "unset at this rung" from "explicitly set to empty" and
+// defer to the next rung in the precedence chain. JSON round-trip is
+// required because Quantity is stringly-typed in the unstructured
+// map (e.g. "512Mi") but needs a Quantity type on the way out.
+//
+// Returns nil on empty input or any decode error — caller falls back
+// to whichever precedence rung has a value.
+func decodeResources(raw map[string]any) *corev1.ResourceRequirements {
+	if len(raw) == 0 {
+		return nil
+	}
+	bytes, err := json.Marshal(raw)
+	if err != nil {
+		log.Warn().Err(err).Msg("encode spec.resources for re-decode")
+		return nil
+	}
+	var out corev1.ResourceRequirements
+	if err := json.Unmarshal(bytes, &out); err != nil {
+		log.Warn().Err(err).Msg("decode spec.resources into corev1.ResourceRequirements")
+		return nil
+	}
+	if len(out.Requests) == 0 && len(out.Limits) == 0 {
+		return nil
+	}
+	return &out
 }
 
 // asString safely extracts a string from an unstructured map field,

@@ -10,6 +10,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -348,3 +349,178 @@ func TestUpsertArrival_PatchPathExercised(t *testing.T) {
 // keep a no-op test importing the GVK to surface obvious schema mistakes
 // at compile time.
 var _ = schema.GroupVersionResource{Group: "qa.leartech.com", Version: "v1alpha1", Resource: "arrivals"}
+
+// TestUpsertArrival_ThreadsServiceResourcesAndPerPackFieldsIntoCR is
+// the CRD-round-trip test — chart-values shape flows through the
+// Watcher into the Arrival CR spec preserving:
+//   - spec.resources (service-wide override)
+//   - spec.testPacks[].resources (per-pack override)
+//   - spec.testPacks[].env (per-pack env layer)
+//
+// Both quantity strings ("512Mi") and EnvVar shapes survive the
+// json.Marshal → unstructured → json.Unmarshal round-trip.
+func TestUpsertArrival_ThreadsServiceResourcesAndPerPackFieldsIntoCR(t *testing.T) {
+	svcRes := &corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("500m"),
+			corev1.ResourceMemory: resource.MustParse("1Gi"),
+		},
+	}
+	packRes := &corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("3Gi")},
+		Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("6Gi")},
+	}
+	services := map[string]config.ServiceConfig{
+		"leartech-portal": {
+			StagingURL: "https://portal.example",
+			Resources:  svcRes,
+			TestPacks: []config.TestPack{
+				{Name: "smoke", Type: "end2end"},
+				{
+					Name:      "end2end-ui",
+					Type:      "end2end-ui",
+					Resources: packRes,
+					Env: []corev1.EnvVar{
+						{Name: "PLAYWRIGHT_WORKERS", Value: "2"},
+					},
+				},
+			},
+		},
+	}
+	w := newTestWatcher(t, services)
+	rs := newRS("rs-1", "leartech-portal", "0.1.0", ptr32(1), "Helm")
+
+	w.handleReplicaSetAdd(context.Background(), rs)
+
+	got, err := w.clients.dynamic.Resource(arrivalGVR).
+		Namespace("jx-staging").
+		Get(context.Background(), "leartech-portal-0-1-0-jx-staging", metav1.GetOptions{})
+	require.NoError(t, err)
+
+	// spec.resources round-trip
+	resMap, found, err := unstructured.NestedMap(got.Object, "spec", "resources")
+	require.NoError(t, err)
+	require.True(t, found, "spec.resources must be present when service.Resources set")
+	req := resMap["requests"].(map[string]any)
+	assert.Equal(t, "500m", req["cpu"])
+	assert.Equal(t, "1Gi", req["memory"])
+
+	// spec.testPacks[]
+	packs, _, _ := unstructured.NestedSlice(got.Object, "spec", "testPacks")
+	require.Len(t, packs, 2)
+	smoke := packs[0].(map[string]any)
+	heavy := packs[1].(map[string]any)
+
+	// smoke has no per-pack resources/env
+	if _, ok := smoke["resources"]; ok {
+		t.Errorf("smoke.resources must be absent when unset in config, got %v", smoke["resources"])
+	}
+	if _, ok := smoke["env"]; ok {
+		t.Errorf("smoke.env must be absent when unset in config, got %v", smoke["env"])
+	}
+
+	// heavy has both
+	heavyRes := heavy["resources"].(map[string]any)
+	heavyReq := heavyRes["requests"].(map[string]any)
+	heavyLim := heavyRes["limits"].(map[string]any)
+	assert.Equal(t, "3Gi", heavyReq["memory"])
+	assert.Equal(t, "6Gi", heavyLim["memory"])
+	heavyEnv := heavy["env"].([]any)
+	require.Len(t, heavyEnv, 1)
+	assert.Equal(t, "PLAYWRIGHT_WORKERS", heavyEnv[0].(map[string]any)["name"])
+	assert.Equal(t, "2", heavyEnv[0].(map[string]any)["value"])
+}
+
+// TestUpsertArrival_NoResourcesNoEnv_BackwardsCompat pins the
+// backward-compat contract: services with no resources / pack-env
+// behave exactly as they did before this initiative — no spec.resources
+// key, no pack.resources / pack.env keys.
+func TestUpsertArrival_NoResourcesNoEnv_BackwardsCompat(t *testing.T) {
+	services := map[string]config.ServiceConfig{
+		"legacy-service": {
+			StagingURL: "https://legacy.example",
+			TestPacks:  []config.TestPack{{Name: "smoke", Type: "end2end"}},
+		},
+	}
+	w := newTestWatcher(t, services)
+	rs := newRS("rs-1", "legacy-service", "1.0.0", ptr32(1), "Helm")
+
+	w.handleReplicaSetAdd(context.Background(), rs)
+
+	got, err := w.clients.dynamic.Resource(arrivalGVR).
+		Namespace("jx-staging").
+		Get(context.Background(), "legacy-service-1-0-0-jx-staging", metav1.GetOptions{})
+	require.NoError(t, err)
+
+	_, found, _ := unstructured.NestedMap(got.Object, "spec", "resources")
+	assert.False(t, found, "spec.resources must not be set when config.Resources is nil (backwards compat)")
+
+	packs, _, _ := unstructured.NestedSlice(got.Object, "spec", "testPacks")
+	require.Len(t, packs, 1)
+	smoke := packs[0].(map[string]any)
+	assert.Nil(t, smoke["resources"], "pack.resources must not be set when unconfigured")
+	assert.Nil(t, smoke["env"], "pack.env must not be set when unconfigured")
+	// Legacy shape had exactly these two keys per pack.
+	for k := range smoke {
+		if k != "name" && k != "type" {
+			t.Errorf("unexpected key %q on pack (backwards compat expects only name+type)", k)
+		}
+	}
+}
+
+// TestTestPacksToSlice_RoundTrip covers the helper in isolation —
+// the more integration-heavy tests above already exercise it via
+// upsertArrival, but a direct test isolates regressions in the JSON
+// round-trip logic from CRD schema questions.
+func TestTestPacksToSlice_RoundTrip(t *testing.T) {
+	in := []config.TestPack{
+		{Name: "smoke", Type: "end2end"},
+		{Name: "heavy", Type: "end2end-ui", Env: []corev1.EnvVar{{Name: "X", Value: "y"}}},
+	}
+	out, err := testPacksToSlice(in)
+	require.NoError(t, err)
+	require.Len(t, out, 2)
+	smoke := out[0].(map[string]any)
+	heavy := out[1].(map[string]any)
+	assert.Equal(t, "smoke", smoke["name"])
+	assert.Equal(t, "end2end", smoke["type"])
+	assert.Equal(t, "heavy", heavy["name"])
+	heavyEnv := heavy["env"].([]any)
+	require.Len(t, heavyEnv, 1)
+	assert.Equal(t, "X", heavyEnv[0].(map[string]any)["name"])
+	assert.Equal(t, "y", heavyEnv[0].(map[string]any)["value"])
+}
+
+// TestTestPacksToSlice_EmptyReturnsNil ensures the "no packs
+// configured" case doesn't produce an empty slice in the CR (which
+// would surface as an empty spec.testPacks key rather than the key
+// being absent — a subtle backwards-compat concern for the controller's
+// Skipped path).
+func TestTestPacksToSlice_EmptyReturnsNil(t *testing.T) {
+	out, err := testPacksToSlice(nil)
+	require.NoError(t, err)
+	assert.Nil(t, out)
+
+	out, err = testPacksToSlice([]config.TestPack{})
+	require.NoError(t, err)
+	assert.Nil(t, out)
+}
+
+// TestResourceRequirementsToMap_RoundTrip pins the direct helper. Nil
+// input → nil output (feeder can check before calling SetNestedMap).
+func TestResourceRequirementsToMap_RoundTrip(t *testing.T) {
+	out, err := resourceRequirementsToMap(nil)
+	require.NoError(t, err)
+	assert.Nil(t, out)
+
+	in := &corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("512Mi")},
+		Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("2Gi")},
+	}
+	out, err = resourceRequirementsToMap(in)
+	require.NoError(t, err)
+	req := out["requests"].(map[string]any)
+	lim := out["limits"].(map[string]any)
+	assert.Equal(t, "512Mi", req["memory"])
+	assert.Equal(t, "2Gi", lim["memory"])
+}
