@@ -1,7 +1,12 @@
+//go:build integration
+
 // reconcileall_envtest_test.go covers reconcileAll — the ticker-driven
 // path that lists every Arrival in the informer cache and reconciles
 // each in turn. Uses envtest so the dynamicinformer factory has a real
-// apiserver to watch. Skips when envtest assets aren't installed.
+// apiserver to watch.
+//
+// Gated by the `integration` build tag: excluded from the default
+// `go test ./...` build. Run via `make test-integration`.
 package controller
 
 import (

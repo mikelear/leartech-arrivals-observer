@@ -1,5 +1,5 @@
 .PHONY: all pre-push lint lint-config lint-check fmt vet tidy tidy-check \
-        build test test-verbose test-coverage envtest-assets vuln secrets clean help diagnose
+        build test test-verbose test-coverage test-integration envtest-assets vuln secrets clean help diagnose
 
 VERSION             ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 GOLANGCI_BASE_URL   := https://raw.githubusercontent.com/mikelear/leartech-pipeline-catalog/main/go/.golangci.base.yml
@@ -11,12 +11,16 @@ GO                  := go
 MODULE              := github.com/mikelear/leartech-arrivals-observer
 
 # envtest — real kube-apiserver + etcd fixture used by the higher-fidelity
-# controller reconcile tests (state_machine_conformance_test.go et al.).
-# Tests SKIP cleanly when KUBEBUILDER_ASSETS is unset OR the binaries
-# aren't present, so `make test` on a fresh laptop still runs — but for
-# maximum coverage + parity with CI, `make envtest-assets` installs the
-# control-plane bundle via setup-envtest. See internal/controller/
-# envtest_harness_test.go for the skip-guard semantics.
+# integration reconcile tests. Gated behind the `integration` Go build
+# tag (see internal/controller/envtest_*_test.go): the DEFAULT `go test
+# ./...` compilation set EXCLUDES these files entirely, so `make test` /
+# `make test-coverage` (and the CI go-test task, which has no envtest
+# binaries) can't try to boot etcd + kube-apiserver and fail. Run via
+# `make test-integration`, which provisions the control-plane bundle on
+# demand via `setup-envtest`.
+#
+# Pattern mirrors leartech-orchestrator-controller/Makefile:
+# https://github.com/mikelear/leartech-orchestrator-controller/blob/main/Makefile
 ENVTEST_K8S_VERSION    := 1.30.x
 SETUP_ENVTEST_VERSION  := latest
 
@@ -70,11 +74,12 @@ tidy-check:   ## Verify go.mod/go.sum are tidy (CI-mode — no writes)
 build:   ## Build the binary
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags="-s -w -X main.version=$(VERSION)" -o bin/server ./cmd/server
 
-envtest-assets:   ## Install setup-envtest + fetch etcd/kube-apiserver bundle
-	@# One-shot bootstrap for the envtest-backed higher-fidelity reconcile
-	@# tests. Skips a re-install when setup-envtest is already present.
-	@# Exports KUBEBUILDER_ASSETS for the caller's shell so the envtest
-	@# harness picks up the binaries on the next `make test`.
+envtest-assets:   ## Install setup-envtest + fetch etcd/kube-apiserver bundle (for make test-integration)
+	@# One-shot bootstrap for the envtest-backed integration tests. Skips
+	@# a re-install when setup-envtest is already present. Exports
+	@# KUBEBUILDER_ASSETS for the caller's shell — `make test-integration`
+	@# also provisions this on-demand, so this target is optional /
+	@# useful for pre-warming in dev.
 	@SETUP_ENVTEST=$$($(GO) env GOPATH)/bin/setup-envtest; \
 	if [ ! -x "$$SETUP_ENVTEST" ]; then \
 		echo "Installing sigs.k8s.io/controller-runtime/tools/setup-envtest@$(SETUP_ENVTEST_VERSION)..."; \
@@ -84,39 +89,44 @@ envtest-assets:   ## Install setup-envtest + fetch etcd/kube-apiserver bundle
 	echo "envtest binaries ready at: $$KUBEBUILDER_ASSETS"; \
 	echo "export KUBEBUILDER_ASSETS=\"$$KUBEBUILDER_ASSETS\""
 
-# Auto-wiring for test / test-coverage: if setup-envtest exists AND
-# KUBEBUILDER_ASSETS is not already set by the caller, populate it so
-# the envtest-backed cases run rather than skip. Zero-cost when
-# setup-envtest isn't installed (empty variable, tests skip).
-KUBEBUILDER_ASSETS_AUTO := $(shell \
-	SETUP_ENVTEST=$$($(GO) env GOPATH)/bin/setup-envtest; \
-	if [ -x "$$SETUP_ENVTEST" ] && [ -z "$$KUBEBUILDER_ASSETS" ]; then \
-		"$$SETUP_ENVTEST" use $(ENVTEST_K8S_VERSION) -p path 2>/dev/null || true; \
-	fi \
-)
-
-test:   ## Run unit tests (envtest cases run if setup-envtest is installed; otherwise skip cleanly)
-	@KUBEBUILDER_ASSETS="$${KUBEBUILDER_ASSETS:-$(KUBEBUILDER_ASSETS_AUTO)}" \
-		$(GO) test ./... -v -count=1 -race
+test:   ## Run unit tests (fake-client only; envtest tests are gated behind -tags=integration — use `make test-integration`)
+	$(GO) test ./... -v -count=1 -race
 
 test-verbose:   ## Run tests with verbose output (alias of test for now)
 	$(GO) test --tags=unit -v -failfast -count=1 ./...
 
-test-coverage:   ## Run tests with coverage threshold check
+test-coverage:   ## Run tests with coverage threshold check (fake-client only — no envtest binaries required)
 	@# One-way RATCHET floor: 70.0. Raised (from the historical 60.0) once
-	@# the envtest + state-machine-conformance + chart-render tests landed
+	@# the fake-client conformance/property/chart-render tests landed
 	@# (2026-08 test-harness-parity initiative). Never lower this — the
 	@# safety property is that a code change accompanied by dropping
 	@# coverage should FAIL the gate rather than silently regress.
 	@# The pipeline task (.lighthouse/jenkins-x/test.yaml) mirrors this
 	@# value via COVERAGE_THRESHOLD; keep them in sync when raising.
-	@KUBEBUILDER_ASSETS="$${KUBEBUILDER_ASSETS:-$(KUBEBUILDER_ASSETS_AUTO)}" \
-		$(GO) test ./... -v -count=1 -race -coverprofile=cover.out
+	@#
+	@# The envtest-backed integration tests (internal/controller/
+	@# envtest_*_test.go, reconcileall_envtest_test.go) are gated behind
+	@# `//go:build integration` and DO NOT compile into the default set,
+	@# so this target — and the CI go-test task — never try to boot
+	@# etcd + kube-apiserver. The 70% floor is met by the fake-client
+	@# path alone (verified locally at 70.4% envtest-off during the
+	@# initial ratchet).
+	$(GO) test ./... -v -count=1 -race -coverprofile=cover.out
 	@TOTAL=$$($(GO) tool cover -func=cover.out | awk '/^total:/ {print $$3}' | sed 's/%//'); \
 	THRESHOLD=70.0; \
 	echo "coverage: $$TOTAL% (threshold: $$THRESHOLD%)"; \
 	awk -v t="$$TOTAL" -v th="$$THRESHOLD" 'BEGIN { exit !(t < th) }' && echo "FAIL: below threshold" && exit 1 || true; \
 	echo "PASS"
+
+test-integration:   ## Run envtest integration tests (real apiserver+etcd; provisions binaries via setup-envtest)
+	@# Mirrors leartech-orchestrator-controller/Makefile's test-integration
+	@# target. Runs `go test -tags=integration` against the envtest-backed
+	@# files (envtest_*_test.go, reconcileall_envtest_test.go), which are
+	@# hidden from the default `go test ./...` set by the `integration`
+	@# build tag. KUBEBUILDER_ASSETS is populated on-demand via the
+	@# canonical setup-envtest one-liner so the target is self-contained.
+	KUBEBUILDER_ASSETS="$$($(GO) run sigs.k8s.io/controller-runtime/tools/setup-envtest@$(SETUP_ENVTEST_VERSION) use $(ENVTEST_K8S_VERSION) -p path)" \
+		$(GO) test -tags=integration ./internal/controller/... -run Envtest -count=1 -v
 
 vuln:   ## Scan for known Go vulnerabilities (govulncheck)
 	@command -v govulncheck >/dev/null || $(GO) install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)

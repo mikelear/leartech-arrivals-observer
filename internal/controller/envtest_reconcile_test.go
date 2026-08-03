@@ -1,3 +1,5 @@
+//go:build integration
+
 // envtest_reconcile_test.go is the high-fidelity reconcile scenario
 // asked for in the initiative — a real kube-apiserver + etcd, no
 // kubelet, driving the SAME controller code the production controller
@@ -5,8 +7,9 @@
 // forgiving on subtleties fakes elide (patch semantics, /status
 // subresource, CRD schema rejection).
 //
-// Gated by envtest_harness_test.go's requireEnvtest — when assets are
-// missing, each test SKIPS with a message pointing at KUBEBUILDER_ASSETS.
+// Gated by the `integration` build tag: excluded from the default
+// `go test ./...` build so the CI go-test task doesn't try to boot
+// envtest without binaries. Run via `make test-integration`.
 package controller
 
 import (

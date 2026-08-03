@@ -1,3 +1,5 @@
+//go:build integration
+
 // envtest_harness_test.go bootstraps a high-fidelity K8s test
 // environment for controller tests that want a REAL apiserver + etcd
 // (no kubelet). Complements the fast dynamicfake-backed unit tests in
@@ -6,11 +8,13 @@
 // nobody re-implements identically, CRD schema validation, status
 // subresource semantics, resource-version conflicts).
 //
-// GATED — the harness is only exercised when the envtest binaries are
-// installed AND KUBEBUILDER_ASSETS points at them. Without those,
-// `go test` skips this file's tests cleanly so a laptop-without-assets
-// run stays green. The catalog go-test task installs envtest via the
-// setup-envtest tool, so CI exercises this path.
+// GATED by the `integration` build tag — this file (and every other
+// envtest-backed file in this package) is EXCLUDED from the default
+// `go test ./...` compilation set. The default CI go-test task (which
+// has no envtest binaries and no KUBEBUILDER_ASSETS) therefore cannot
+// even build these tests, let alone try to start etcd + kube-apiserver
+// and fail. Run explicitly via `make test-integration`, which provisions
+// binaries via `setup-envtest` and re-runs `go test -tags=integration`.
 //
 // Design mirrors orchestrator-controller's envtest bootstrap in intent:
 // one *envtest.Environment shared across tests via TestMain, with
