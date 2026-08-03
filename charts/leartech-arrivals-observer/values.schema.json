@@ -45,7 +45,20 @@
       "type": "object",
       "properties": {
         "cluster": { "type": "string", "enum": ["", "gcp", "az"] },
-        "logLevel": { "type": "string", "enum": ["trace", "debug", "info", "warn", "error"] }
+        "logLevel": { "type": "string", "enum": ["trace", "debug", "info", "warn", "error"] },
+        "logFormat": { "type": "string", "enum": ["", "json", "console"], "description": "LOG_FORMAT env — 'json' toggles the structured Loki-queryable logger; anything else is console output." }
+      }
+    },
+    "grafana": {
+      "type": "object",
+      "properties": {
+        "dashboard": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean", "description": "Install the arrivals-observer Grafana dashboard as a ConfigMap (JX sidecar auto-imports)." },
+            "folder": { "type": "string", "description": "Grafana folder the dashboard lands in." }
+          }
+        }
       }
     },
     "database": {

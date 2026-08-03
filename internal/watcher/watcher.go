@@ -172,13 +172,18 @@ func (w *Watcher) handleReplicaSetAdd(ctx context.Context, obj any) {
 	arrivalName := arrivalNameFor(service, version, w.cfg.Namespace)
 	if err := w.upsertArrival(ctx, rs, arrivalName, service, version); err != nil {
 		log.Error().Err(err).
+			Str("event", "arrival_upsert_failed").
+			Str("arrival", arrivalName).
 			Str("rs", rs.Name).
 			Str("service", service).
 			Str("version", version).
 			Msg("upsert arrival failed")
 		return
 	}
+	// event=arrival_created lets Loki pivot on lifecycle:
+	// `{app="leartech-arrivals-observer"} | json | arrival="<x>" | event=~"arrival_.*|pack_.*"`.
 	log.Info().
+		Str("event", "arrival_created").
 		Str("arrival", arrivalName).
 		Str("rs", rs.Name).
 		Str("service", service).

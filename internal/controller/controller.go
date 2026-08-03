@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,6 +36,7 @@ import (
 
 	"github.com/mikelear/leartech-arrivals-observer/internal/dispatch"
 	"github.com/mikelear/leartech-arrivals-observer/internal/forensics"
+	"github.com/mikelear/leartech-arrivals-observer/internal/metrics"
 )
 
 // Phase enum mirrors the CRD's status.phase enum.
@@ -276,7 +278,14 @@ func (c *Controller) handlePending(ctx context.Context, u *unstructured.Unstruct
 	serviceResSpec, _, _ := unstructured.NestedMap(u.Object, "spec", "resources")
 
 	if len(packs) == 0 {
-		log.Info().Str("arrival", name).Msg("no test packs configured → Skipped")
+		log.Info().
+			Str("event", "arrival_skipped").
+			Str("arrival", name).
+			Str("service", service).
+			Str("version", version).
+			Str("phase", PhaseSkipped).
+			Msg("no test packs configured → Skipped")
+		metrics.RecordArrivalFinalized(PhaseSkipped, service)
 		c.patchStatus(ctx, name, map[string]any{
 			"phase":       PhaseSkipped,
 			"finalizedAt": time.Now().UTC().Format(time.RFC3339),
@@ -393,10 +402,26 @@ func (c *Controller) handlePending(ctx context.Context, u *unstructured.Unstruct
 			entry["jobName"] = jn
 		}
 		statusTests = append(statusTests, entry)
+		// event=pack_dispatched — one record per pack so
+		// `arrival="<x>" | event="pack_dispatched"` lists exactly
+		// what was dispatched for this arrival.
+		log.Info().
+			Str("event", "pack_dispatched").
+			Str("arrival", name).
+			Str("service", service).
+			Str("version", version).
+			Str("pack", t.PackName).
+			Str("packType", t.PackType).
+			Msg("test pack dispatched")
 	}
 
+	// event=arrival_testing — the Pending→Testing transition itself.
 	log.Info().
+		Str("event", "arrival_testing").
 		Str("arrival", name).
+		Str("service", service).
+		Str("version", version).
+		Str("phase", PhaseTesting).
 		Str("stagingUrl", stagingURL).
 		Int("packs", len(tests)).
 		Bool("realDispatch", c.cfg.Dispatcher != nil).
@@ -427,7 +452,16 @@ func (c *Controller) handleTesting(ctx context.Context, u *unstructured.Unstruct
 
 	// Wall-clock timeout — force Timeout if we've been here too long.
 	if time.Since(startedAt) > c.cfg.Timeout {
-		log.Warn().Str("arrival", name).Dur("elapsed", time.Since(startedAt)).Msg("dispatch timeout")
+		service, _, _ := unstructured.NestedString(u.Object, "spec", "service")
+		version, _, _ := unstructured.NestedString(u.Object, "spec", "version")
+		log.Warn().
+			Str("event", "arrival_timeout").
+			Str("arrival", name).
+			Str("service", service).
+			Str("version", version).
+			Str("phase", PhaseTimeout).
+			Dur("elapsed", time.Since(startedAt)).
+			Msg("dispatch timeout")
 		c.finalize(ctx, u, PhaseTimeout)
 		return
 	}
@@ -449,6 +483,9 @@ func (c *Controller) handleTesting(ctx context.Context, u *unstructured.Unstruct
 	if len(tests) == 0 {
 		return
 	}
+	service, _, _ := unstructured.NestedString(u.Object, "spec", "service")
+	version, _, _ := unstructured.NestedString(u.Object, "spec", "version")
+
 	updated := make([]any, 0, len(tests))
 	allDone := true
 	anyFailed := false
@@ -483,12 +520,41 @@ func (c *Controller) handleTesting(ctx context.Context, u *unstructured.Unstruct
 		case dispatch.JobPassed:
 			tm["status"] = "Passed"
 			tm["completedAt"] = time.Now().UTC().Format(time.RFC3339)
+			recordPackResult(tm, service, "Passed")
 		case dispatch.JobFailed:
 			tm["status"] = "Failed"
 			tm["completedAt"] = time.Now().UTC().Format(time.RFC3339)
 			anyFailed = true
+			recordPackResult(tm, service, "Failed")
+			// OOM detection is best-effort: if the dispatcher exposes
+			// per-pod reason, IsOOMReason gates the counter bump.
+			// Absent detection returns "" and the branch no-ops.
+			if reason := jobFailureReason(ctx, c.cfg.Dispatcher, c.cfg.Namespace, jobName); metrics.IsOOMReason(reason) {
+				metrics.RecordJobOOM(service)
+				log.Warn().
+					Str("event", "pack_oom").
+					Str("arrival", name).
+					Str("service", service).
+					Str("version", version).
+					Str("pack", asString(tm["name"])).
+					Str("job", jobName).
+					Msg("pack Job OOMKilled")
+			}
 		case dispatch.JobRunning, dispatch.JobUnknown:
 			allDone = false
+		}
+		// event=pack_result fires on any state transition (Running→terminal)
+		// so consumers see the moment a pack settled, with its verdict.
+		if newStatus := asString(tm["status"]); newStatus == "Passed" || newStatus == "Failed" {
+			log.Info().
+				Str("event", "pack_result").
+				Str("arrival", name).
+				Str("service", service).
+				Str("version", version).
+				Str("pack", asString(tm["name"])).
+				Str("packStatus", newStatus).
+				Str("job", jobName).
+				Msg("pack settled")
 		}
 		updated = append(updated, tm)
 	}
@@ -511,7 +577,20 @@ func (c *Controller) handleTesting(ctx context.Context, u *unstructured.Unstruct
 		"tests":       updated,
 		"finalizedAt": time.Now().UTC().Format(time.RFC3339),
 	})
-	log.Info().Str("arrival", name).Str("phase", phase).Msg("arrival finalized (real dispatch)")
+	metrics.RecordArrivalFinalized(phase, service)
+	// event=arrival_passed | arrival_failed — terminal record so a
+	// single Loki query can count outcomes per service.
+	terminalEvent := "arrival_passed"
+	if phase == PhaseFailed {
+		terminalEvent = "arrival_failed"
+	}
+	log.Info().
+		Str("event", terminalEvent).
+		Str("arrival", name).
+		Str("service", service).
+		Str("version", version).
+		Str("phase", phase).
+		Msg("arrival finalized (real dispatch)")
 
 	// Fire-and-forget forensics on every terminal phase, Passed included.
 	// The Tempo snapshot is valuable per-arrival regardless of outcome:
@@ -686,6 +765,8 @@ func (c *Controller) findPreviousVersion(ctx context.Context, service, currentVe
 // terminal too.
 func (c *Controller) finalize(ctx context.Context, u *unstructured.Unstructured, phase string) {
 	name := u.GetName()
+	service, _, _ := unstructured.NestedString(u.Object, "spec", "service")
+	version, _, _ := unstructured.NestedString(u.Object, "spec", "version")
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	tests, _, _ := unstructured.NestedSlice(u.Object, "status", "tests")
@@ -706,6 +787,17 @@ func (c *Controller) finalize(ctx context.Context, u *unstructured.Unstructured,
 				tm["status"] = "Timeout"
 			}
 			tm["completedAt"] = now
+			// One pack_result per promoted pack — matches the shape emitted
+			// from handleTesting's polling loop for real-dispatch mode.
+			recordPackResult(tm, service, asString(tm["status"]))
+			log.Info().
+				Str("event", "pack_result").
+				Str("arrival", name).
+				Str("service", service).
+				Str("version", version).
+				Str("pack", asString(tm["name"])).
+				Str("packStatus", asString(tm["status"])).
+				Msg("pack settled (finalize)")
 		}
 		patched = append(patched, tm)
 	}
@@ -719,7 +811,78 @@ func (c *Controller) finalize(ctx context.Context, u *unstructured.Unstructured,
 		"tests":       patched,
 		"finalizedAt": now,
 	})
-	log.Info().Str("arrival", name).Str("phase", phase).Msg("arrival finalized")
+	metrics.RecordArrivalFinalized(phase, service)
+	// Map phase to Loki-friendly event name so a single query can grep
+	// all terminal transitions across arrivals.
+	terminalEvent := "arrival_" + strings.ToLower(phase)
+	log.Info().
+		Str("event", terminalEvent).
+		Str("arrival", name).
+		Str("service", service).
+		Str("version", version).
+		Str("phase", phase).
+		Msg("arrival finalized")
+}
+
+// recordPackResult records a pack's terminal status: increments the
+// PackResult counter and, if the pack has both startedAt + completedAt,
+// records the wall-clock pack duration histogram observation. The pack
+// map is the *status* map (name, startedAt, completedAt, status, jobName).
+//
+// Kept as a package function (not a *Controller method) so tests that
+// don't spin up a full controller can drive it directly. Nil-safe on
+// missing keys — a malformed pack skips the histogram but still records
+// the counter.
+func recordPackResult(pack map[string]any, service, status string) {
+	metrics.RecordPackResult(status, service)
+	packName := asString(pack["name"])
+	if packName == "" || service == "" {
+		return
+	}
+	startedAt := asString(pack["startedAt"])
+	completedAt := asString(pack["completedAt"])
+	if startedAt == "" || completedAt == "" {
+		return
+	}
+	start, err := time.Parse(time.RFC3339, startedAt)
+	if err != nil {
+		return
+	}
+	end, err := time.Parse(time.RFC3339, completedAt)
+	if err != nil {
+		return
+	}
+	if end.Before(start) {
+		return
+	}
+	metrics.ObservePackDuration(service, packName, end.Sub(start).Seconds())
+}
+
+// jobFailureReason returns the pack Job's underlying pod-termination
+// reason if the dispatcher exposes one — e.g. "OOMKilled". Returns ""
+// on any lookup failure or when the dispatcher doesn't implement the
+// optional reader (nil-safe).
+//
+// Extracted here (not on *Dispatcher) so the controller doesn't grow a
+// hard dep on a new dispatch method; the type-assertion lets the
+// dispatcher evolve independently.
+func jobFailureReason(ctx context.Context, d *dispatch.Dispatcher, namespace, jobName string) string {
+	if d == nil {
+		return ""
+	}
+	type reasonReader interface {
+		GetFailureReason(ctx context.Context, namespace, jobName string) (string, error)
+	}
+	rr, ok := any(d).(reasonReader)
+	if !ok {
+		return ""
+	}
+	reason, err := rr.GetFailureReason(ctx, namespace, jobName)
+	if err != nil {
+		log.Debug().Err(err).Str("job", jobName).Msg("get job failure reason failed")
+		return ""
+	}
+	return reason
 }
 
 // patchStatus issues a merge-patch against the /status subresource.

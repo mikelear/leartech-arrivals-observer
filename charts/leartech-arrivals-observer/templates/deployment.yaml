@@ -46,6 +46,11 @@ spec:
           value: {{ .Values.config.cluster | quote }}
         - name: LOG_LEVEL
           value: {{ .Values.config.logLevel | quote }}
+        # Toggles the structured-JSON logger. Set to "json" in-cluster so
+        # Loki `| json` parses the stream; unset locally for the
+        # ConsoleWriter output.
+        - name: LOG_FORMAT
+          value: {{ .Values.config.logFormat | quote }}
         {{- if .Values.database.enabled }}
         - name: DATABASE_URL
           valueFrom:
