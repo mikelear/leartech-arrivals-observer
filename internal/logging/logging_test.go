@@ -102,6 +102,43 @@ func TestNormalize(t *testing.T) {
 	}
 }
 
+// TestInit_ReadsLogFormatEnv exercises the Init() wrapper's env-read
+// path — mirrors what main.go does at process start. Since Init
+// mutates the global logger, restore it after the test.
+func TestInit_ReadsLogFormatEnv(t *testing.T) {
+	// zerolog writes global logger; snapshot + restore.
+	original := log.Logger
+	defer func() { log.Logger = original }()
+
+	// Preserve caller env.
+	orig, hadOrig := lookupEnv(FormatEnvVar)
+	defer func() {
+		if hadOrig {
+			setEnv(FormatEnvVar, orig)
+		} else {
+			unsetEnv(FormatEnvVar)
+		}
+	}()
+
+	// Case 1: LOG_FORMAT=json → FormatJSON returned
+	setEnv(FormatEnvVar, "json")
+	if got := Init("svc", "v", "gcp"); got != FormatJSON {
+		t.Errorf("Init with LOG_FORMAT=json returned %q, want json", got)
+	}
+
+	// Case 2: LOG_FORMAT unset → FormatConsole returned
+	unsetEnv(FormatEnvVar)
+	if got := Init("svc", "v", "gcp"); got != FormatConsole {
+		t.Errorf("Init with LOG_FORMAT unset returned %q, want console", got)
+	}
+
+	// Case 3: LOG_FORMAT=logfmt (unrecognised) → FormatConsole
+	setEnv(FormatEnvVar, "logfmt")
+	if got := Init("svc", "v", "gcp"); got != FormatConsole {
+		t.Errorf("Init with LOG_FORMAT=logfmt returned %q, want console", got)
+	}
+}
+
 // TestInitTo_AllowsEmptyAmbientFields — Init should tolerate all three
 // fields being empty (unit tests, dev environments without CLUSTER_ID).
 // The record still emits, just without those fields.
