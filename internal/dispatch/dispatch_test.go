@@ -198,6 +198,158 @@ func TestParseResources_Real(t *testing.T) {
 	}
 }
 
+// testDispatcher returns a Dispatcher whose Config pins distinct images
+// for the default (playwright) + plan-conformance paths so buildJob
+// assertions can tell them apart. clients is nil — buildJob never
+// touches the K8s API.
+func testDispatcher() *Dispatcher {
+	return New(Config{
+		RunnerImage:                "playwright-runner:test",
+		PlanConformanceRunnerImage: "conformance-runner:test",
+		ResultStoreBucket:          "test-bucket",
+		ClusterID:                  "gcp",
+		ActiveDeadlineSeconds:      1800,
+		RepoHost:                   "github.com",
+		RepoOrg:                    "mikelear",
+		PostDeployPathTemplate:     "results/v1/post-deploy/{{.Cluster}}/{{.Namespace}}/{{.Service}}/{{.Version}}/{{.Pack}}",
+	}, nil)
+}
+
+// TestBuildJob_PlanConformance_UsesRunnerImageNoCloneNoProbe locks the
+// new dispatch branch: a plan-conformance pack builds a Job that
+//   - uses the conformance runner image (NOT the playwright RunnerImage),
+//   - runs a script with NO git-clone and NO staging-URL health-probe,
+//   - still uploads results.json to the SAME GCS path contract, and
+//   - keeps labels / naming / resources / deadline identical.
+func TestBuildJob_PlanConformance_UsesRunnerImageNoCloneNoProbe(t *testing.T) {
+	d := testDispatcher()
+	args := Args{
+		ArrivalName: "leartech-orchestrator-controller-0-0-1-jx-staging",
+		Namespace:   "jx-staging",
+		Service:     "leartech-orchestrator-controller",
+		Version:     "0.0.1",
+		StagingURL:  "", // no staging URL for this pack
+	}
+	pack := Test{PackName: "plan-conformance", PackType: PackTypePlanConformance}
+	jobName := jobNameFor(args.ArrivalName, pack.PackName)
+
+	job, err := d.buildJob(args, pack, jobName)
+	if err != nil {
+		t.Fatalf("buildJob: %v", err)
+	}
+
+	container := job.Spec.Template.Spec.Containers[0]
+
+	// Image: conformance runner, NOT playwright.
+	if container.Image != "conformance-runner:test" {
+		t.Errorf("image = %q, want conformance-runner:test", container.Image)
+	}
+	if container.Image == d.cfg.RunnerImage {
+		t.Errorf("plan-conformance must NOT use the playwright RunnerImage %q", d.cfg.RunnerImage)
+	}
+
+	// Script: no clone, no health probe.
+	if len(container.Command) != 3 || container.Command[0] != "bash" {
+		t.Fatalf("unexpected command: %v", container.Command)
+	}
+	script := container.Command[2]
+	for _, forbidden := range []string{"git clone", "clone_with_fallback", "HEALTH_SUCCESS_THRESHOLD", "staging healthy"} {
+		if strings.Contains(script, forbidden) {
+			t.Errorf("plan-conformance script must NOT contain %q (no clone / no health probe)", forbidden)
+		}
+	}
+	// Runs the conformance runner.
+	if !strings.Contains(script, "plan-conformance-runner") {
+		t.Error("plan-conformance script must invoke the conformance runner binary")
+	}
+	// Still uploads results.json to the shared GCS contract.
+	for _, want := range []string{
+		`gsutil cp results.json "${DEST_PREFIX}/results.json"`,
+		`DEST_PREFIX="gs://${RESULT_STORE_BUCKET}/${RESULT_STORE_PATH_PREFIX}"`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("plan-conformance script must reuse the shared upload: missing %q", want)
+		}
+	}
+
+	// Labels + naming identical to the default path.
+	if job.Labels["qa.leartech.com/test-pack"] != "plan-conformance" {
+		t.Errorf("test-pack label = %q, want plan-conformance", job.Labels["qa.leartech.com/test-pack"])
+	}
+	if job.Labels["app.kubernetes.io/managed-by"] != "leartech-arrivals-observer" {
+		t.Error("managed-by label must be preserved")
+	}
+	if job.Name != jobName {
+		t.Errorf("job name = %q, want %q", job.Name, jobName)
+	}
+	// Deadline + backoff preserved.
+	if job.Spec.ActiveDeadlineSeconds == nil || *job.Spec.ActiveDeadlineSeconds != 1800 {
+		t.Errorf("ActiveDeadlineSeconds not preserved: %v", job.Spec.ActiveDeadlineSeconds)
+	}
+
+	// RESULT_DIR must be exported so the upload finds results.json.
+	if !strings.Contains(script, "RESULT_DIR") {
+		t.Error("plan-conformance script must set RESULT_DIR")
+	}
+}
+
+// TestBuildJob_DefaultPack_UnchangedPlaywrightPath asserts the default
+// (end2end / end2end-ui) branch still uses the playwright RunnerImage
+// and retains the clone + health-probe steps — i.e. the new branch is
+// additive, not a rewrite.
+func TestBuildJob_DefaultPack_UnchangedPlaywrightPath(t *testing.T) {
+	d := testDispatcher()
+	args := Args{
+		ArrivalName: "leartech-portal-0-0-1-jx-staging",
+		Namespace:   "jx-staging",
+		Service:     "leartech-portal",
+		Version:     "0.0.1",
+		StagingURL:  "https://leartech-portal-jx-staging.gcp.leartech.com",
+	}
+	for _, packType := range []string{"end2end", "end2end-ui"} {
+		t.Run(packType, func(t *testing.T) {
+			pack := Test{PackName: packType, PackType: packType}
+			jobName := jobNameFor(args.ArrivalName, pack.PackName)
+			job, err := d.buildJob(args, pack, jobName)
+			if err != nil {
+				t.Fatalf("buildJob: %v", err)
+			}
+			container := job.Spec.Template.Spec.Containers[0]
+			if container.Image != "playwright-runner:test" {
+				t.Errorf("image = %q, want playwright-runner:test", container.Image)
+			}
+			script := container.Command[2]
+			for _, want := range []string{"clone_with_fallback", "HEALTH_SUCCESS_THRESHOLD"} {
+				if !strings.Contains(script, want) {
+					t.Errorf("default path must retain %q", want)
+				}
+			}
+			if strings.Contains(script, "plan-conformance-runner") {
+				t.Error("default path must NOT invoke the conformance runner")
+			}
+		})
+	}
+}
+
+// TestPlanConformanceScript_SharesUploadWithDefault is a coupling check:
+// both scripts must reference the shared upload fragment (single writer
+// of the GCS path contract). If someone forks the upload logic, this
+// fails loudly.
+func TestPlanConformanceScript_SharesUploadWithDefault(t *testing.T) {
+	marker := `gsutil cp results.json "${DEST_PREFIX}/results.json"`
+	if !strings.Contains(runnerScript, marker) {
+		t.Error("runnerScript no longer references the shared upload fragment")
+	}
+	if !strings.Contains(planConformanceRunnerScript, marker) {
+		t.Error("planConformanceRunnerScript no longer references the shared upload fragment")
+	}
+	// logs.jsonl upload shared too.
+	logMarker := `gsutil cp "$LOG_PATH" "${DEST_PREFIX}/logs.jsonl"`
+	if !strings.Contains(runnerScript, logMarker) || !strings.Contains(planConformanceRunnerScript, logMarker) {
+		t.Error("both scripts must share the logs.jsonl upload fragment")
+	}
+}
+
 // TestRunnerScript_ResultsJSONOverridesTestExit locks the contract that the
 // dispatcher's inline runner script translates results.json.success=false
 // into a non-zero exit code for end2end packs — even when the catalog's

@@ -13,6 +13,10 @@ data:
   DISPATCH_TIMEOUT_MINUTES: {{ .Values.dispatch.timeoutMinutes | quote }}
   DISPATCH_POLL_INTERVAL_SECONDS: {{ .Values.dispatch.pollIntervalSeconds | quote }}
   DISPATCH_RUNNER_IMAGE: {{ printf "%s/%s:%s" .Values.dispatch.runnerImageRegistry .Values.dispatch.runnerImageRepository .Values.dispatch.runnerImageTag | quote }}
+  # Self-contained runner image for testPacks of type `plan-conformance`
+  # (no clone / no staging-URL probe). Consumed by dispatch's
+  # plan-conformance code path only; default packs keep DISPATCH_RUNNER_IMAGE.
+  DISPATCH_PLAN_CONFORMANCE_RUNNER_IMAGE: {{ printf "%s/%s:%s" .Values.dispatch.planConformanceRunnerImageRegistry .Values.dispatch.planConformanceRunnerImageRepository .Values.dispatch.planConformanceRunnerImageTag | quote }}
   DISPATCH_RESULT_STORE_BUCKET: {{ .Values.dispatch.resultStoreBucket | quote }}
   DISPATCH_GCS_KEY_SECRET: {{ .Values.dispatch.gcsKeySecret | quote }}
 
