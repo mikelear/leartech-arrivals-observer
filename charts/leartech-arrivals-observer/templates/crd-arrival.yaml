@@ -83,7 +83,7 @@ spec:
                     name: { type: string }
                     type:
                       type: string
-                      enum: [end2end, end2end-ui, contract, unit, load]
+                      enum: [end2end, end2end-ui, contract, unit, load, plan-conformance]
                     resources:
                       type: object
                       description: "Optional per-pack resource requests/limits (corev1.ResourceRequirements). Overrides service.resources + global default. Precedence: pack > service > global."
@@ -129,7 +129,7 @@ spec:
                     name: { type: string }
                     type:
                       type: string
-                      enum: [end2end, end2end-ui, contract, unit, load]
+                      enum: [end2end, end2end-ui, contract, unit, load, plan-conformance]
                     status:
                       type: string
                       enum: [Pending, Running, Passed, Failed, Timeout]
