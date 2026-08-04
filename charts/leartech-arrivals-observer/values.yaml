@@ -221,7 +221,29 @@ affinity: {}
 # For template consumers that want the same bundle without YAML anchors,
 # the chart also exposes `leartech.authPersonasEnvVars` (see
 # templates/_env-personas.tpl).
-services: {}
+#
+# plan-conformance pack example — a stagingUrl-less service whose single
+# pack is of type `plan-conformance`. The dispatcher runs the
+# self-contained conformance runner (dispatch.planConformanceRunnerImage),
+# skips clone + health-probe, and uploads results.json to the same GCS
+# path contract. Registered here under the sentinel service
+# `leartech-orchestrator-controller` because the conformance corpus
+# certifies that controller's plan-run machinery, so it should run when
+# the controller arrives:
+#
+#   services:
+#     leartech-orchestrator-controller:
+#       stagingUrl: ""              # no HTTP — conformance is in-process
+#       testPacks:
+#         - { name: plan-conformance, type: plan-conformance }
+services:
+  # Sentinel: run the plan-conformance corpus per-deploy of the
+  # orchestrator controller. Empty stagingUrl → no health probe;
+  # the plan-conformance pack type skips clone + staging-URL wait.
+  leartech-orchestrator-controller:
+    stagingUrl: ""
+    testPacks:
+      - { name: plan-conformance, type: plan-conformance }
 
 # Test dispatch tunables. timeoutMinutes is wall-clock per Arrival; once
 # elapsed, remaining tests get Timeout and the Arrival is finalized.
@@ -236,6 +258,18 @@ dispatch:
   runnerImageRegistry: us-central1-docker.pkg.dev/product-first/oci
   runnerImageRepository: playwright-runner
   runnerImageTag: "0.28.0"
+
+  # Container image used ONLY for testPacks of type `plan-conformance`.
+  # Self-contained runner (scenario corpus embedded via go:embed) — it
+  # needs NO repo clone and NO staging-URL health probe, runs the corpus
+  # in-process (deterministic, ~seconds), writes ${RESULT_DIR}/results.json
+  # in the Gate contract, and exits 0 iff all scenarios passed. Default is
+  # the public GHCR image; override per-cluster (registry-split, same as
+  # the playwright runner + forensics runner) to point at the
+  # version-locked GAR (GCP) / ACR (AZ) mirror.
+  planConformanceRunnerImageRegistry: ghcr.io/mikelear
+  planConformanceRunnerImageRepository: leartech-plan-conformance-runner
+  planConformanceRunnerImageTag: "latest"
   # Kubernetes Secret holding the GCS service-account JSON used by the
   # runner to upload results.json to the result-store bucket. Must exist
   # in the watch namespace; same secret as the pre-merge end2end task.

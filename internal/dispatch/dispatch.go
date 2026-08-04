@@ -50,11 +50,18 @@ import (
 // Config controls dispatch behaviour. Fields populated from chart values
 // via the observer's ConfigMap (see internal/config/config.go).
 type Config struct {
-	RunnerImage           string
-	ResultStoreBucket     string
-	GCSKeySecret          string
-	ClusterID             string
-	ActiveDeadlineSeconds int64
+	RunnerImage string
+	// PlanConformanceRunnerImage is the self-contained conformance-corpus
+	// runner image used ONLY for packs with Type == "plan-conformance".
+	// The binary embeds the scenario corpus (go:embed) and writes
+	// ${RESULT_DIR}/results.json in the same Gate contract as the other
+	// packs — so no repo clone and no staging-URL health probe are needed.
+	// Plumbed through config.go the same way RunnerImage is.
+	PlanConformanceRunnerImage string
+	ResultStoreBucket          string
+	GCSKeySecret               string
+	ClusterID                  string
+	ActiveDeadlineSeconds      int64
 
 	// Repo discovery
 	RepoHost             string
@@ -113,6 +120,14 @@ type Args struct {
 	// per-pack Test.Resources set. Nil = fall back to Config.Resources.
 	ServiceResources *corev1.ResourceRequirements
 }
+
+// PackTypePlanConformance is the pack Type that selects the
+// plan-conformance code path in buildJob: the self-contained conformance
+// runner image (not the playwright RunnerImage), NO repo clone, NO
+// staging-URL health probe, then the same results.json GCS upload as the
+// default packs. Certifies the orchestrator controller's plan-run
+// machinery deterministically in-process (~seconds).
+const PackTypePlanConformance = "plan-conformance"
 
 // Dispatcher creates Jobs.
 type Dispatcher struct {
@@ -297,6 +312,19 @@ func (d *Dispatcher) buildJob(args Args, t Test, jobName string) (*batchv1.Job, 
 	// touching every other pack.
 	envVars := resolveEnv(standardEnv, args.Env, t.Env)
 
+	// Select image + inline script by pack type. Default (end2end /
+	// end2end-ui) uses the universal playwright RunnerImage + the
+	// clone+health+test+upload runnerScript. plan-conformance uses the
+	// self-contained conformance runner image + a script that skips the
+	// clone/health steps and just runs the runner then uploads its
+	// results.json to the SAME GCS path contract (verdict path unchanged).
+	image := d.cfg.RunnerImage
+	script := runnerScript
+	if t.PackType == PackTypePlanConformance {
+		image = d.cfg.PlanConformanceRunnerImage
+		script = planConformanceRunnerScript
+	}
+
 	// Resolve resources with precedence pack > service > global > defensive
 	// fallback. Isolated in a helper so unit tests can pin each rung.
 	resources := resolveResources(t.Resources, args.ServiceResources, d.cfg.Resources)
@@ -336,7 +364,7 @@ func (d *Dispatcher) buildJob(args Args, t Test, jobName string) (*batchv1.Job, 
 					}},
 					Containers: []corev1.Container{{
 						Name:  "runner",
-						Image: d.cfg.RunnerImage,
+						Image: image,
 						Env:   envVars,
 						VolumeMounts: []corev1.VolumeMount{{
 							Name:      "gcs-key",
@@ -344,7 +372,7 @@ func (d *Dispatcher) buildJob(args Args, t Test, jobName string) (*batchv1.Job, 
 							ReadOnly:  true,
 						}},
 						Resources: resources,
-						Command:   []string{"bash", "-c", runnerScript},
+						Command:   []string{"bash", "-c", script},
 					}},
 				},
 			},
@@ -459,8 +487,12 @@ func resolveEnv(layers ...[]corev1.EnvVar) []corev1.EnvVar {
 	return out
 }
 
-// runnerScript is the inline bash that runs inside the Job container.
-// Reads env, clones, waits, runs the test pack, uploads results.
+// scriptPrologue is the shared bash prologue for BOTH the default
+// (playwright) runnerScript and the planConformanceRunnerScript: strict
+// mode, the durable-log path, and the log_json helper. Kept as one
+// fragment so the log schema + durability guarantee stay identical
+// across pack types (the plan-conformance path reuses the same Loki
+// view + GCS logs.jsonl upload as end2end / end2end-ui).
 //
 // Log durability: stdout+stderr are teed to /tmp/logs.jsonl for the
 // entire run so, after the pod is GC'd (K8s reaps completed Job pods
@@ -470,7 +502,7 @@ func resolveEnv(layers ...[]corev1.EnvVar) []corev1.EnvVar {
 // so a single line stands alone in a Loki-imported JSON view — mirrors
 // the "survives pod GC" pattern the automated-agent dashboards use for
 // agent pods.
-const runnerScript = `set -euo pipefail
+const scriptPrologue = `set -euo pipefail
 
 LOG_PATH=/tmp/logs.jsonl
 : > "$LOG_PATH"
@@ -495,8 +527,56 @@ log_json() {
   printf '{"time":"%s","level":"%s","event":"%s","service":"%s","version":"%s","pack":"%s","arrival":"%s","cluster":"%s","msg":"%s"%s}\n' \
     "$now" "$level" "$event" "${SERVICE:-}" "${VERSION:-}" "${TEST_PACK:-}" "${ARRIVAL_NAME:-}" "${CLUSTER_ID:-}" "$msg" "$kv" \
     | tee -a "$LOG_PATH"
-}
+}`
 
+// resultsUploadFragment is the shared "auth gcloud + upload results.json"
+// tail used by BOTH pack paths. Factored out (rather than duplicated)
+// so the GCS path contract with leartech-gate's reader is written from
+// exactly one place. Expects DEST_PREFIX-derivable env (RESULT_STORE_*)
+// and a results.json in the current working directory. Does NOT upload
+// Playwright artifacts (that stays in the default runnerScript) and does
+// NOT do the end2end exit-translation (only the default path needs it;
+// the conformance runner already exits non-zero on failure).
+const resultsUploadFragment = `
+# Auth gcloud once for all uploads.
+gcloud auth activate-service-account --key-file="$GOOGLE_APPLICATION_CREDENTIALS" 2>/dev/null || \
+  echo "::WARN gcloud auth failed (key-file missing?); uploads may fail"
+
+# Upload destination: pre-rendered template prefix from controller
+# (CONTRACT — must match leartech-gate's reader).
+DEST_PREFIX="gs://${RESULT_STORE_BUCKET}/${RESULT_STORE_PATH_PREFIX}"
+
+if [ -f results.json ]; then
+  echo "==> uploading results.json to ${DEST_PREFIX}/results.json"
+  gsutil cp results.json "${DEST_PREFIX}/results.json" || \
+    echo "::WARN results.json upload failed"
+fi`
+
+// logsUploadFragment is the shared "upload durable logs.jsonl then exit
+// with $TEST_EXIT" tail used by BOTH pack paths. Uploaded LAST so it
+// captures everything the script emitted (including the results.json
+// upload above). Even on failure the log lands, so "why did this pack
+// fail" is debuggable long after K8s reaps the pod.
+const logsUploadFragment = `
+log_json info pack_runner_done \
+  msg="pack runner finished" \
+  testExit="$TEST_EXIT"
+if [ -f "$LOG_PATH" ]; then
+  # Best-effort — a log-upload failure never masks the test verdict
+  # (we still exit with $TEST_EXIT below).
+  gsutil cp "$LOG_PATH" "${DEST_PREFIX}/logs.jsonl" 2>/dev/null || \
+    echo "::WARN logs.jsonl upload failed (bucket=${DEST_PREFIX})"
+fi
+
+echo "==> done; test exit code=${TEST_EXIT}"
+exit $TEST_EXIT`
+
+// runnerScript is the inline bash that runs inside the default (playwright)
+// Job container. Reads env, clones, waits, runs the test pack, uploads
+// results. Composed from scriptPrologue + the clone/health/test body +
+// the shared resultsUploadFragment + Playwright-artifact uploads +
+// end2end exit-translation + logsUploadFragment.
+const runnerScript = scriptPrologue + `
 log_json info pack_runner_start \
   msg="pack runner started" \
   stagingUrl="${STAGING_URL:-}" \
@@ -579,20 +659,7 @@ case "$TEST_PACK_TYPE" in
     echo "::FATAL unsupported TEST_PACK_TYPE=$TEST_PACK_TYPE"; exit 1
     ;;
 esac
-
-# Auth gcloud once for all uploads.
-gcloud auth activate-service-account --key-file="$GOOGLE_APPLICATION_CREDENTIALS" 2>/dev/null || \
-  echo "::WARN gcloud auth failed (key-file missing?); uploads may fail"
-
-# Upload destination: pre-rendered template prefix from controller
-# (CONTRACT — must match leartech-gate's reader).
-DEST_PREFIX="gs://${RESULT_STORE_BUCKET}/${RESULT_STORE_PATH_PREFIX}"
-
-if [ -f results.json ]; then
-  echo "==> uploading results.json to ${DEST_PREFIX}/results.json"
-  gsutil cp results.json "${DEST_PREFIX}/results.json" || \
-    echo "::WARN results.json upload failed"
-fi
+` + resultsUploadFragment + `
 
 # Playwright artifacts — trace.zip + screenshots + videos + HTML report.
 if [ -d "test-results" ]; then
@@ -640,24 +707,49 @@ if [ "$TEST_PACK_TYPE" = "end2end" ] && [ "$TEST_EXIT" -eq 0 ] && [ -f results.j
     TEST_EXIT=1
   fi
 fi
+` + logsUploadFragment
 
-# Durable pack-job logs. Uploaded LAST so it captures everything the
-# script emitted, including the results.json upload above. Even when
-# TEST_EXIT != 0 the log lands, so "why did this pack fail" is
-# debuggable long after K8s reaps the pod.
-log_json info pack_runner_done \
-  msg="pack runner finished" \
-  testExit="$TEST_EXIT"
-if [ -f "$LOG_PATH" ]; then
-  # Best-effort — a log-upload failure never masks the test verdict
-  # (we still exit with $TEST_EXIT below).
-  gsutil cp "$LOG_PATH" "${DEST_PREFIX}/logs.jsonl" 2>/dev/null || \
-    echo "::WARN logs.jsonl upload failed (bucket=${DEST_PREFIX})"
-fi
+// planConformanceRunnerScript is the inline bash for a "plan-conformance"
+// pack. It runs the self-contained conformance runner (which embeds the
+// scenario corpus + writes ${RESULT_DIR}/results.json in the Gate
+// contract and exits non-zero on failure) then uploads that results.json
+// to the SAME GCS path contract as the default packs — so leartech-gate
+// reads the verdict identically and NO controller change is needed.
+//
+// Deliberately does NOT clone the service repo and does NOT health-probe
+// STAGING_URL: this pack is a deterministic in-process L1 test with no
+// staging URL. RESULT_DIR is the runner's cwd so the shared
+// resultsUploadFragment (which reads ./results.json) uploads it.
+// PLAN_CONFORMANCE_SPEC (optional comma-separated subset) is passed
+// through from the pack's Env when set; the runner defaults to the full
+// embedded corpus otherwise.
+const planConformanceRunnerScript = scriptPrologue + `
+log_json info pack_runner_start \
+  msg="plan-conformance runner started" \
+  packType="${TEST_PACK_TYPE:-}" \
+  spec="${PLAN_CONFORMANCE_SPEC:-}"
+echo "==> arrival=$ARRIVAL_NAME service=$SERVICE version=$VERSION pack=$TEST_PACK type=$TEST_PACK_TYPE" | tee -a "$LOG_PATH"
+echo "==> cluster=$CLUSTER_ID namespace=$NAMESPACE bucket=$RESULT_STORE_BUCKET" | tee -a "$LOG_PATH"
+echo "==> resultPathPrefix=$RESULT_STORE_PATH_PREFIX" | tee -a "$LOG_PATH"
 
-echo "==> done; test exit code=${TEST_EXIT}"
-exit $TEST_EXIT
-`
+# From this point on, every stdout+stderr line is also captured to $LOG_PATH.
+exec > >(tee -a "$LOG_PATH") 2>&1
+
+# RESULT_DIR is the runner's cwd so results.json lands where the shared
+# upload fragment reads it. No repo clone, no staging-URL health probe —
+# the conformance corpus is embedded in the runner image and runs
+# in-process against a fake client (deterministic, ~seconds).
+WORK=/tmp/work
+mkdir -p "$WORK" && cd "$WORK"
+export RESULT_DIR="$WORK"
+
+TEST_EXIT=0
+# The runner image's entrypoint is the conformance binary; invoke it via
+# its default command. It honours RESULT_DIR + optional PLAN_CONFORMANCE_SPEC
+# and exits 0 iff all scenarios passed.
+plan-conformance-runner || TEST_EXIT=$?
+echo "==> conformance runner exit=$TEST_EXIT"
+` + resultsUploadFragment + logsUploadFragment
 
 // jobNameFor builds the K8s Job name for an arrival × pack pair.
 //

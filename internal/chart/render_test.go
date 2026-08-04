@@ -350,6 +350,51 @@ func TestChart_CRDArrival_PhaseEnumMatches(t *testing.T) {
 	}
 }
 
+// TestChart_ConfigMap_RendersPlanConformanceRunnerImage — the ConfigMap
+// must emit DISPATCH_PLAN_CONFORMANCE_RUNNER_IMAGE assembled from the
+// registry/repository/tag split, so the dispatcher's plan-conformance
+// branch has an image to run.
+func TestChart_ConfigMap_RendersPlanConformanceRunnerImage(t *testing.T) {
+	files := renderChart(t, nil)
+	body, ok := files["templates/configmap.yaml"]
+	require.True(t, ok)
+	docs := parseYAMLDocs(t, body)
+	require.Len(t, docs, 1)
+	data := mustNested(t, docs[0], "data")
+
+	img, ok := data["DISPATCH_PLAN_CONFORMANCE_RUNNER_IMAGE"].(string)
+	require.True(t, ok, "configmap must set DISPATCH_PLAN_CONFORMANCE_RUNNER_IMAGE")
+	assert.Equal(t, "ghcr.io/mikelear/leartech-plan-conformance-runner:latest", img)
+}
+
+// TestChart_Services_RegistersPlanConformanceSentinel — the default
+// services map registers the plan-conformance pack under the sentinel
+// service leartech-orchestrator-controller with an empty stagingUrl, so
+// the corpus runs when the controller arrives.
+func TestChart_Services_RegistersPlanConformanceSentinel(t *testing.T) {
+	files := renderChart(t, nil)
+	body, ok := files["templates/configmap.yaml"]
+	require.True(t, ok)
+	docs := parseYAMLDocs(t, body)
+	require.Len(t, docs, 1)
+	data := mustNested(t, docs[0], "data")
+
+	raw, ok := data["SERVICES_JSON"].(string)
+	require.True(t, ok)
+	var services map[string]map[string]any
+	require.NoError(t, json.Unmarshal([]byte(raw), &services))
+
+	ctrl, ok := services["leartech-orchestrator-controller"]
+	require.True(t, ok, "sentinel service leartech-orchestrator-controller must be registered")
+	assert.Equal(t, "", ctrl["stagingUrl"], "sentinel stagingUrl must be empty (no HTTP)")
+	packs, ok := ctrl["testPacks"].([]any)
+	require.True(t, ok)
+	require.Len(t, packs, 1)
+	pack := packs[0].(map[string]any)
+	assert.Equal(t, "plan-conformance", pack["name"])
+	assert.Equal(t, "plan-conformance", pack["type"])
+}
+
 // mustNested walks a nested map/list structure with mixed string keys
 // and "[N]" list indices, failing the test on the first missing rung.
 // Preferred over unstructured.NestedMap since we're operating on
