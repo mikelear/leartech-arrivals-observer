@@ -15,7 +15,9 @@ edit the JSON as JSON (validated by `jq empty`) rather than embedding
 it as an escaped Helm string. Empty-file guard on Files.Get so a chart
 without the file doesn't render an empty ConfigMap.
 */}}
-{{- if .Values.grafana.dashboard.enabled }}
+{{- /* Skip in preview namespaces (*-pr-<N>): same dashboard uid+filename as prod, and the
+     cluster Grafana sidecar (searchNamespace: ALL) would let a preview clobber prod. */ -}}
+{{- if and .Values.grafana.dashboard.enabled (not (contains "-pr-" .Release.Namespace)) }}
 {{- $body := .Files.Get "files/grafana/arrivals-observer-dashboard.json" }}
 {{- if $body }}
 apiVersion: v1
