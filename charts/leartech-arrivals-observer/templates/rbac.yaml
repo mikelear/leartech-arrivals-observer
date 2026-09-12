@@ -30,7 +30,9 @@ rules:
   verbs: ["get", "update", "patch"]
 - apiGroups: ["batch"]
   resources: ["jobs"]
-  verbs: ["get", "list", "watch", "create", "delete"]
+  # patch: clearing a `foregroundDeletion` finalizer the garbage collector has
+  # stopped clearing. Without it a wedged Job blocks re-dispatch forever.
+  verbs: ["get", "list", "watch", "create", "delete", "patch"]
 - apiGroups: ["coordination.k8s.io"]
   resources: ["leases"]
   verbs: ["get", "create", "update"]
