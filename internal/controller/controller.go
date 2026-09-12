@@ -383,7 +383,20 @@ func (c *Controller) handlePending(ctx context.Context, u *unstructured.Unstruct
 			ServiceResources: serviceRes,
 		}, tests)
 		if err != nil {
-			log.Error().Err(err).Str("arrival", name).Msg("dispatch failed; arrival → Failed")
+			// Record what DID dispatch before failing. An Arrival that ends
+			// Failed with tests=[] is indistinguishable from "the packs were
+			// declared but produced nothing" — which is how a wedged Job
+			// deletion masqueraded as five failing services for four days,
+			// and nearly got their testPacks deleted as "dishonest". Partial
+			// evidence beats none.
+			c.patchStatus(ctx, name, map[string]any{
+				"tests": dispatchEvidence(tests, jobNames),
+			})
+			log.Error().Err(err).
+				Str("arrival", name).
+				Int("packsDeclared", len(tests)).
+				Int("packsDispatched", len(jobNames)).
+				Msg("dispatch failed; arrival → Failed")
 			c.finalize(ctx, u, PhaseFailed)
 			return
 		}
@@ -434,6 +447,33 @@ func (c *Controller) handlePending(ctx context.Context, u *unstructured.Unstruct
 		"phase": PhaseTesting,
 		"tests": statusTests,
 	})
+}
+
+// dispatchEvidence renders one status.tests entry per DECLARED pack, marking
+// those that never got a Job. Used on the dispatch-failure path so a reader can
+// tell "the suite ran and found problems" from "the suite never started" —
+// status.tests=[] conflates them, and Gate reports the latter as the former.
+func dispatchEvidence(tests []dispatch.Test, jobNames map[string]string) []any {
+	out := make([]any, 0, len(tests))
+	for _, t := range tests {
+		entry := map[string]any{
+			"name":       t.PackName,
+			"type":       t.PackType,
+			"retryCount": int64(0),
+		}
+		if jn, ok := jobNames[t.PackName]; ok {
+			entry["jobName"] = jn
+			entry["status"] = "Running"
+		} else {
+			// "Pending" not a new value like "NotDispatched": the CRD pins
+			// tests[].status to [Pending, Running, Passed, Failed, Timeout],
+			// and a rejected status patch would put us straight back to the
+			// empty tests[] this function exists to prevent.
+			entry["status"] = "Pending"
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 // handleTesting advances a Testing arrival. Polls each test's Job status

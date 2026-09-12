@@ -44,6 +44,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -133,6 +134,29 @@ const PackTypePlanConformance = "plan-conformance"
 type Dispatcher struct {
 	cfg     Config
 	clients kubernetes.Interface
+
+	// Poll budgets for the delete-then-recreate path. Zero means the
+	// production defaults below; tests shorten them so the wedged-finalizer
+	// paths can be exercised without a 30s wait.
+	deleteWait     time.Duration
+	forceClearWait time.Duration
+}
+
+// deleteBudget is how long to wait for a Foreground deletion to cascade.
+func (d *Dispatcher) deleteBudget() time.Duration {
+	if d.deleteWait > 0 {
+		return d.deleteWait
+	}
+	return 30 * time.Second
+}
+
+// forceClearBudget is how long to wait for the Job to vanish after its
+// finalizers were cleared by hand.
+func (d *Dispatcher) forceClearBudget() time.Duration {
+	if d.forceClearWait > 0 {
+		return d.forceClearWait
+	}
+	return 10 * time.Second
 }
 
 // New constructs a Dispatcher.
@@ -156,7 +180,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, args Args, tests []Test) (map
 		jobName := jobNameFor(args.ArrivalName, t.PackName)
 		job, err := d.buildJob(args, t, jobName)
 		if err != nil {
-			return nil, fmt.Errorf("build job %s: %w", jobName, err)
+			return out, fmt.Errorf("build job %s: %w", jobName, err)
 		}
 		_, err = d.clients.BatchV1().Jobs(args.Namespace).Create(ctx, job, metav1.CreateOptions{})
 		switch {
@@ -167,20 +191,26 @@ func (d *Dispatcher) Dispatch(ctx context.Context, args Args, tests []Test) (map
 				Str("pack", t.PackName).
 				Msg("dispatched test job")
 		case apierrors.IsAlreadyExists(err):
-			log.Info().Str("job", jobName).Msg("job already exists — deleting + recreating for re-dispatch")
-			if err := d.deleteJobAndWait(ctx, args.Namespace, jobName); err != nil {
-				return nil, fmt.Errorf("delete stale job %s: %w", jobName, err)
+			adopted, rerr := d.reconcileExistingJob(ctx, args.Namespace, jobName, job)
+			if rerr != nil {
+				// out is returned alongside the error, not discarded: packs
+				// earlier in this loop have real Jobs running, and the caller
+				// must be able to record them. Returning nil here is what left
+				// Arrivals with status.tests=[] while their suites ran on.
+				return out, fmt.Errorf("existing job %s: %w", jobName, rerr)
 			}
-			if _, err := d.clients.BatchV1().Jobs(args.Namespace).Create(ctx, job, metav1.CreateOptions{}); err != nil {
-				return nil, fmt.Errorf("recreate job %s after delete: %w", jobName, err)
+			msg := "dispatched test job (after deleting stale)"
+			if adopted {
+				msg = "adopted the in-flight job under this name (not re-dispatched)"
 			}
 			log.Info().
 				Str("arrival", args.ArrivalName).
 				Str("job", jobName).
 				Str("pack", t.PackName).
-				Msg("dispatched test job (after deleting stale)")
+				Bool("adopted", adopted).
+				Msg(msg)
 		default:
-			return nil, fmt.Errorf("create job %s: %w", jobName, err)
+			return out, fmt.Errorf("create job %s: %w", jobName, err)
 		}
 		out[t.PackName] = jobName
 	}
@@ -201,8 +231,8 @@ func (d *Dispatcher) deleteJobAndWait(ctx context.Context, namespace, jobName st
 	if err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete: %w", err)
 	}
-	// Poll until gone or timeout. 1s ticks, 30s budget.
-	deadline := time.Now().Add(30 * time.Second)
+	// Poll until gone or timeout. 1s ticks.
+	deadline := time.Now().Add(d.deleteBudget())
 	for time.Now().Before(deadline) {
 		_, err := d.clients.BatchV1().Jobs(namespace).Get(ctx, jobName, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
@@ -217,7 +247,139 @@ func (d *Dispatcher) deleteJobAndWait(ctx context.Context, namespace, jobName st
 		case <-time.After(time.Second):
 		}
 	}
-	return fmt.Errorf("timeout waiting for job %s deletion (foreground propagation still in progress)", jobName)
+	// Escalation. Foreground deletion leaves a `foregroundDeletion` finalizer
+	// that the garbage collector clears once every dependent is gone. That can
+	// wedge permanently: on 2026-09-08, twenty succeeded Jobs across both
+	// clusters sat in Terminating with no Pods left and the finalizer still
+	// set. Every later re-dispatch timed out here, the controller returned
+	// before writing status.tests, and five services whose suites had PASSED
+	// reported Arrival.phase=Failed — blocking every GitOps PR for four days.
+	//
+	// A wedged finalizer is not a reason to fail an Arrival, so clear it and
+	// let the deletion complete. Never for a Job with live Pods: see
+	// clearWedgedFinalizers.
+	if err := d.clearWedgedFinalizers(ctx, namespace, jobName); err != nil {
+		return fmt.Errorf("timeout waiting for job %s deletion, and force-clearing its finalizers failed: %w", jobName, err)
+	}
+	return nil
+}
+
+// clearWedgedFinalizers removes the finalizers from a Job that is marked for
+// deletion but whose cascade has stalled, then waits for it to disappear.
+//
+// It refuses to touch a Job with Active Pods: the finalizer is doing real work
+// in that case, and forcing it would orphan a running suite — the mirror image
+// of the bug this exists to fix.
+func (d *Dispatcher) clearWedgedFinalizers(ctx context.Context, namespace, jobName string) error {
+	existing, err := d.clients.BatchV1().Jobs(namespace).Get(ctx, jobName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil // it completed while we were deciding
+	}
+	if err != nil {
+		return fmt.Errorf("get before force-clear: %w", err)
+	}
+	if existing.Status.Active > 0 {
+		return fmt.Errorf("job still has %d active pod(s); the cascade is progressing, not wedged", existing.Status.Active)
+	}
+	if len(existing.Finalizers) == 0 {
+		return fmt.Errorf("no finalizers to clear — the deletion is blocked by something else")
+	}
+
+	log.Warn().
+		Str("job", jobName).
+		Strs("finalizers", existing.Finalizers).
+		Msg("job deletion is wedged with no active pods — force-clearing finalizers")
+
+	if _, err := d.clients.BatchV1().Jobs(namespace).Patch(
+		ctx, jobName, types.MergePatchType,
+		[]byte(`{"metadata":{"finalizers":null}}`),
+		metav1.PatchOptions{},
+	); err != nil {
+		return fmt.Errorf("patch away finalizers: %w", err)
+	}
+
+	deadline := time.Now().Add(d.forceClearBudget())
+	for time.Now().Before(deadline) {
+		_, err := d.clients.BatchV1().Jobs(namespace).Get(ctx, jobName, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("poll after force-clear: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+	return fmt.Errorf("job %s still present after clearing its finalizers", jobName)
+}
+
+// reconcileExistingJob resolves a Create that came back AlreadyExists.
+//
+// The Job name embeds arrival + version + pack, so a Job already holding this
+// name is *this arrival's own* prior run rather than a foreign one. Two cases,
+// and the distinction matters:
+//
+//   - Active Pods — the suite is running right now. Adopt it. The controller
+//     polls the name returned here, so a duplicate reconcile can no longer
+//     delete a suite out from under itself.
+//   - terminal — a genuine re-dispatch (#143 rollout-restart retest). The old
+//     verdict must NOT be reused as if it were fresh, so delete and recreate.
+//
+// Returns adopted=true when the caller should poll the existing Job.
+func (d *Dispatcher) reconcileExistingJob(ctx context.Context, namespace, jobName string, want *batchv1.Job) (bool, error) {
+	existing, err := d.clients.BatchV1().Jobs(namespace).Get(ctx, jobName, metav1.GetOptions{})
+	switch {
+	case apierrors.IsNotFound(err):
+		// Gone between our Create and this Get; the name is free again.
+		if _, cerr := d.clients.BatchV1().Jobs(namespace).Create(ctx, want, metav1.CreateOptions{}); cerr != nil {
+			return false, fmt.Errorf("recreate after it vanished: %w", cerr)
+		}
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("get existing: %w", err)
+	}
+
+	if existing.DeletionTimestamp == nil && existing.Status.Active > 0 {
+		return true, nil
+	}
+
+	delErr := d.deleteJobAndWait(ctx, namespace, jobName)
+	if delErr == nil {
+		if _, err := d.clients.BatchV1().Jobs(namespace).Create(ctx, want, metav1.CreateOptions{}); err != nil {
+			return false, fmt.Errorf("recreate after delete: %w", err)
+		}
+		return false, nil
+	}
+
+	// The old Job cannot be removed, so this name can never be recreated.
+	// If it already SUCCEEDED, its verdict is still this arrival's verdict:
+	// the name encodes arrival + version + pack, so nothing else could have
+	// produced it. Adopt it rather than failing the Arrival.
+	//
+	// This is the 2026-09-08 case. Twenty Jobs wedged in Terminating because
+	// `spec.template` had drifted from what the apiserver now validates, so
+	// every update to them — ours AND the garbage collector's finalizer
+	// removal — was rejected as immutable. Unremovable and unrecreatable, they
+	// failed every re-dispatch, and five services whose suites had PASSED
+	// reported Arrival.phase=Failed and blocked every GitOps PR for four days.
+	//
+	// Reusing the verdict is weaker than a fresh run: the pods restarted since
+	// it was produced. But the alternative here is not a fresh run — it is no
+	// run at all and a false Failed. Warn loudly and take the real result.
+	if existing.Status.Succeeded > 0 {
+		log.Warn().
+			Str("job", jobName).
+			AnErr("deleteError", delErr).
+			Time("terminatingSince", existing.DeletionTimestamp.Time).
+			Msg("cannot replace this job, but its suite already succeeded — adopting that verdict " +
+				"instead of failing the arrival")
+		return true, nil
+	}
+
+	return false, delErr
 }
 
 // pathVars is the substitution context for the post-deploy path template.
