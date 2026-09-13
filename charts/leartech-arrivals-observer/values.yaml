@@ -256,26 +256,9 @@ dispatch:
   # for both end2end (bash run.sh) and end2end-ui (npx playwright test).
   # Override per-cluster via dispatch.runnerImageRegistry (e.g. AZ ACR).
   #
-  # 0.51.5 is the first tag carrying `authtoken`, the Go JWT/JSON reader the
-  # end2end packs now use (leartech-dockerfiles #145). Without it,
-  # leartech-go-service-template 0.1.117's staging pack reported
-  #
-  #   fleet-test  FAIL  no authtoken binary at /workspace/source/authtoken
-  #
-  # and the qa-gate went red on both GitOps promotion PRs for a service that
-  # was fine: the PR pipeline compiles that binary and this Job did not have
-  # it. The check skips rather than fails now, but a skip is lost coverage --
-  # the staging pack is the only place the real login flow is exercised.
-  #
-  # This is a 23-version jump from 0.28.0, so it also brings everything else
-  # that changed in the image since. Probed 0.51.5 before pinning it rather
-  # than trusting the version number:
-  #
-  #   authtoken=/usr/local/bin/authtoken   (claim scp -> "a b")
-  #   playwright=Version 1.63.0
-  #   jq, python3 and gsutil all present
-  #
-  # so the pack contract this chart's runner script depends on is intact.
+  # Must be a tag carrying /usr/local/bin/authtoken: the end2end packs read
+  # tokens with it, and a tag without it turns those checks into skips.
+  # leartech-dockerfiles #145 added it; 0.51.5 is the first such tag.
   runnerImageRegistry: us-central1-docker.pkg.dev/product-first/oci
   runnerImageRepository: playwright-runner
   runnerImageTag: "0.51.5"
