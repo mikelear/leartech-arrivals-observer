@@ -256,9 +256,10 @@ dispatch:
   # for both end2end (bash run.sh) and end2end-ui (npx playwright test).
   # Override per-cluster via dispatch.runnerImageRegistry (e.g. AZ ACR).
   #
-  # Must be a tag carrying /usr/local/bin/authtoken: the end2end packs read
-  # tokens with it, and a tag without it turns those checks into skips.
-  # leartech-dockerfiles #145 added it; 0.51.5 is the first such tag.
+  # 0.51.5 onwards ships /usr/local/bin/authtoken, which the end2end packs use
+  # to read tokens — leartech-dockerfiles #145. The image's own build
+  # self-tests that binary, which is where it is proven; nothing in this repo
+  # can inspect the contents of an image.
   runnerImageRegistry: us-central1-docker.pkg.dev/product-first/oci
   runnerImageRepository: playwright-runner
   runnerImageTag: "0.51.5"
