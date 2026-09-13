@@ -256,6 +256,8 @@ dispatch:
   # for both end2end (bash run.sh) and end2end-ui (npx playwright test).
   # Override per-cluster via dispatch.runnerImageRegistry (e.g. AZ ACR).
   #
+  # The registry is per cluster (az overrides it to its ACR); the TAG is not,
+  # so it must exist in both.  proven-by: TestChart_ConfigMap_RunnerImageRegistryIsOverridable
   runnerImageRegistry: us-central1-docker.pkg.dev/product-first/oci
   runnerImageRepository: playwright-runner
   runnerImageTag: "0.28.0"
