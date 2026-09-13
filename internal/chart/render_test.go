@@ -395,6 +395,69 @@ func TestChart_Services_RegistersPlanConformanceSentinel(t *testing.T) {
 	assert.Equal(t, "plan-conformance", pack["type"])
 }
 
+// chartValues loads the chart's own values.yaml, so a test can assert the
+// TYPE a value has in YAML. Rendering flattens everything to strings, which
+// is precisely how an unquoted numeric tag hides.
+func chartValues(t *testing.T) map[string]any {
+	t.Helper()
+	c, err := loader.Load(chartRelPath)
+	require.NoError(t, err)
+	require.NotEmpty(t, c.Values, "chart has no values.yaml")
+	return c.Values
+}
+
+// TestChart_ConfigMap_RunnerImageIsCompleteAndTagIsAString guards two ways
+// this pin has already gone wrong.
+//
+// A tag without /usr/local/bin/authtoken turns the end2end packs' token
+// reads into skips: leartech-go-service-template 0.1.117's staging pack
+// reported "no authtoken binary at /workspace/source/authtoken", because the
+// PR pipeline compiles that binary and this Job does not. That is a version
+// question this test cannot answer, but it CAN insist the three fields are
+// all present, because a missing one silently yields an image reference like
+// "registry//playwright-runner:" that only fails at pod start.
+//
+// And the tag has to be a string. Unquoted 0.28 is a YAML float, so it would
+// reach the Job as "0.28" — an image tag that does not exist. The current
+// value 0.51.5 happens not to parse as a number, which is exactly why this
+// needs asserting rather than assuming.
+func TestChart_ConfigMap_RunnerImageIsCompleteAndTagIsAString(t *testing.T) {
+	files := renderChart(t, nil)
+	body, ok := files["templates/configmap.yaml"]
+	require.True(t, ok)
+	docs := parseYAMLDocs(t, body)
+	require.Len(t, docs, 1)
+	data := mustNested(t, docs[0], "data")
+
+	img, ok := data["DISPATCH_RUNNER_IMAGE"].(string)
+	require.True(t, ok, "configmap must set DISPATCH_RUNNER_IMAGE")
+
+	parts := strings.Split(img, ":")
+	require.Len(t, parts, 2, "runner image %q must be repository:tag", img)
+	assert.NotEmpty(t, parts[0], "empty repository in %q", img)
+	assert.NotEmpty(t, parts[1], "empty tag in %q — a missing runnerImageTag renders "+
+		"an image reference that only fails at pod start", img)
+	// An empty registry renders "/playwright-runner:0.51.5" — no double
+	// slash, nothing empty after splitting on ":", and still unpullable. The
+	// first version of this assertion looked for "//" and missed it, which a
+	// mutation caught.
+	assert.NotContains(t, parts[0], "//", "double slash in %q means an empty value", img)
+	assert.False(t, strings.HasPrefix(img, "/"), "image %q starts with / — the registry "+
+		"value is empty", img)
+	assert.Contains(t, parts[0], "/", "image %q has no registry component", img)
+
+	// The tag as the chart's values hold it, before rendering flattens it.
+	vals := chartValues(t)
+	dispatch, ok := vals["dispatch"].(map[string]any)
+	require.True(t, ok, "values.yaml has no dispatch map")
+	tag, ok := dispatch["runnerImageTag"]
+	require.True(t, ok, "dispatch.runnerImageTag must be set")
+	_, isString := tag.(string)
+	assert.True(t, isString, "dispatch.runnerImageTag is %T (%v), not a string. Unquoted "+
+		"0.28 is a YAML float and would reach the Job as the tag \"0.28\", which does "+
+		"not exist.", tag, tag)
+}
+
 // mustNested walks a nested map/list structure with mixed string keys
 // and "[N]" list indices, failing the test on the first missing rung.
 // Preferred over unstructured.NestedMap since we're operating on
