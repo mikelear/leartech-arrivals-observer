@@ -395,6 +395,53 @@ func TestChart_Services_RegistersPlanConformanceSentinel(t *testing.T) {
 	assert.Equal(t, "plan-conformance", pack["type"])
 }
 
+// TestChart_ConfigMap_RunnerImageRegistryIsOverridable proves the portability
+// the default value depends on.
+//
+// dispatch.runnerImageRegistry defaults to gcp's Artifact Registry, which an
+// AI reviewer flagged as tying the chart to one cluster. It does not, because
+// az overrides it — its live config reads
+// modernburro.azurecr.io/mikelear/playwright-runner — but "it does not"
+// was an assertion about the chart with nothing behind it.
+//
+// It matters because the registry is per cluster while the TAG is not: a tag
+// present in one registry and absent from the other is what left az's staging
+// packs Pending on
+//
+//	ErrImagePull: modernburro.azurecr.io/mikelear/playwright-runner:0.51.5 ... NotFound
+//
+// and an Arrival stuck in phase=Testing keeps the qa-gate red on every
+// promotion PR. No chart test can check two registries; what it can pin is
+// that the override path works, so the tag is the only shared part.
+func TestChart_ConfigMap_RunnerImageRegistryIsOverridable(t *testing.T) {
+	const azRegistry = "modernburro.azurecr.io/mikelear"
+
+	files := renderChart(t, map[string]any{
+		"dispatch": map[string]any{"runnerImageRegistry": azRegistry},
+	})
+	body, ok := files["templates/configmap.yaml"]
+	require.True(t, ok)
+	docs := parseYAMLDocs(t, body)
+	require.Len(t, docs, 1)
+	img, ok := mustNested(t, docs[0], "data")["DISPATCH_RUNNER_IMAGE"].(string)
+	require.True(t, ok)
+
+	assert.True(t, strings.HasPrefix(img, azRegistry+"/"),
+		"overriding dispatch.runnerImageRegistry did not change the image: got %q. The "+
+			"default would then be baked in and az could not point at its own ACR.", img)
+	assert.NotContains(t, img, "us-central1-docker.pkg.dev",
+		"the gcp default survived an override in %q", img)
+
+	// The tag is NOT per cluster, which is the asymmetry that bit us.
+	vals := chartValues(t)
+	dispatch, ok := vals["dispatch"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "0.28.0", dispatch["runnerImageTag"],
+		"the pinned tag must exist in BOTH registries. 0.51.5 was released to gcp only "+
+			"(leartech-dockerfiles #145 ran no az build), and this one value is shared, so "+
+			"az's packs could not start at all.")
+}
+
 // chartValues loads the chart's own values.yaml, so a test can assert the
 // TYPE a value has in YAML. Rendering flattens everything to strings, which
 // is precisely how an unquoted numeric tag hides.
