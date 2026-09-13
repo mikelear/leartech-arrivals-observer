@@ -400,7 +400,7 @@ func TestChart_Services_RegistersPlanConformanceSentinel(t *testing.T) {
 // is precisely how an unquoted numeric tag hides.
 func chartValues(t *testing.T) map[string]any {
 	t.Helper()
-	c, err := loader.Load(filepath.Join(chartRelPath))
+	c, err := loader.Load(chartRelPath)
 	require.NoError(t, err)
 	require.NotEmpty(t, c.Values, "chart has no values.yaml")
 	return c.Values
