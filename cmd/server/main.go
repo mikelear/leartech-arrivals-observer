@@ -119,7 +119,7 @@ func run() error {
 			GCSKeySecret:               cfg.DispatchGCSKeySecret,
 			ClusterID:                  cfg.ClusterID,
 			ActiveDeadlineSeconds:      int64(cfg.DispatchTimeout().Seconds()),
-			JobTTLSecondsAfterFinished: int32(cfg.JobTTLSecondsAfterFinished),
+			JobTTLSecondsAfterFinished: cfg.JobTTLSecondsAfterFinished,
 			RepoHost:                   cfg.DispatchRepoHost,
 			RepoOrg:                    cfg.DispatchRepoOrg,
 			RefFallbackTemplates:       strings.Split(cfg.DispatchRefFallbacksRaw, "|"),
@@ -143,7 +143,7 @@ func run() error {
 	var forensicsDispatcher *forensics.Dispatcher
 	if cfg.ForensicsEnabled && cfg.ForensicsRunnerImage != "" {
 		forensicsDispatcher = forensics.New(forensics.Config{
-			JobTTLSecondsAfterFinished: int32(cfg.JobTTLSecondsAfterFinished),
+			JobTTLSecondsAfterFinished: cfg.JobTTLSecondsAfterFinished,
 			Enabled:                    cfg.ForensicsEnabled,
 			RunnerImage:                cfg.ForensicsRunnerImage,
 			TempoBaseURL:               cfg.ForensicsTempoBaseURL,

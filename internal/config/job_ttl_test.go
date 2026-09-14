@@ -13,7 +13,7 @@ import (
 // worse than the leak it replaces, so the DEFAULT is the thing worth pinning:
 // a missing env var must never mean zero.
 func TestJobTTLDefaultIsSaneWhenUnset(t *testing.T) {
-	os.Unsetenv("JOB_TTL_SECONDS_AFTER_FINISHED")
+	require.NoError(t, os.Unsetenv("JOB_TTL_SECONDS_AFTER_FINISHED"))
 
 	c, err := Load()
 	require.NoError(t, err)
@@ -24,7 +24,7 @@ func TestJobTTLDefaultIsSaneWhenUnset(t *testing.T) {
 	// The run budget is the floor worth checking against. A TTL shorter than
 	// the time a job may take is not wrong — TTL counts from completion — but
 	// a TTL under a few minutes leaves no window to read a failed run at all.
-	require.GreaterOrEqual(t, c.JobTTLSecondsAfterFinished, 300,
+	require.GreaterOrEqual(t, c.JobTTLSecondsAfterFinished, int32(300),
 		"under five minutes there is no practical chance to read a failed run's logs")
 }
 
@@ -35,5 +35,5 @@ func TestJobTTLIsOverridable(t *testing.T) {
 
 	c, err := Load()
 	require.NoError(t, err)
-	require.Equal(t, 600, c.JobTTLSecondsAfterFinished)
+	require.Equal(t, int32(600), c.JobTTLSecondsAfterFinished)
 }

@@ -103,7 +103,7 @@ type Config struct {
 	//
 	// 24h by default: long enough to read a failed run's logs the next
 	// morning, short enough that the count stays in double figures.
-	JobTTLSecondsAfterFinished  int    `envconfig:"JOB_TTL_SECONDS_AFTER_FINISHED" default:"86400"`
+	JobTTLSecondsAfterFinished  int32  `envconfig:"JOB_TTL_SECONDS_AFTER_FINISHED" default:"86400"`
 	DispatchPollIntervalSeconds int    `envconfig:"DISPATCH_POLL_INTERVAL_SECONDS" default:"30"`
 	DispatchRunnerImage         string `envconfig:"DISPATCH_RUNNER_IMAGE"`
 	// DispatchPlanConformanceRunnerImage is the self-contained conformance
