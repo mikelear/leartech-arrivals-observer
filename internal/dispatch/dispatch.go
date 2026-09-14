@@ -63,6 +63,7 @@ type Config struct {
 	GCSKeySecret               string
 	ClusterID                  string
 	ActiveDeadlineSeconds      int64
+	JobTTLSecondsAfterFinished int32
 
 	// Repo discovery
 	RepoHost             string
@@ -506,6 +507,10 @@ func (d *Dispatcher) buildJob(args Args, t Test, jobName string) (*batchv1.Job, 
 		Spec: batchv1.JobSpec{
 			BackoffLimit:          ptrInt32(backoff),
 			ActiveDeadlineSeconds: &deadline,
+			// Counted from completion, so it cannot cut a run short.
+			// Without it nothing reaps this Job: it has no ownerReference,
+			// no helm release and no chart.
+			TTLSecondsAfterFinished: ptrInt32(d.cfg.JobTTLSecondsAfterFinished),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{

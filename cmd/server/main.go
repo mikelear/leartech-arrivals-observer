@@ -119,6 +119,7 @@ func run() error {
 			GCSKeySecret:               cfg.DispatchGCSKeySecret,
 			ClusterID:                  cfg.ClusterID,
 			ActiveDeadlineSeconds:      int64(cfg.DispatchTimeout().Seconds()),
+			JobTTLSecondsAfterFinished: int32(cfg.JobTTLSecondsAfterFinished),
 			RepoHost:                   cfg.DispatchRepoHost,
 			RepoOrg:                    cfg.DispatchRepoOrg,
 			RefFallbackTemplates:       strings.Split(cfg.DispatchRefFallbacksRaw, "|"),
@@ -142,20 +143,21 @@ func run() error {
 	var forensicsDispatcher *forensics.Dispatcher
 	if cfg.ForensicsEnabled && cfg.ForensicsRunnerImage != "" {
 		forensicsDispatcher = forensics.New(forensics.Config{
-			Enabled:               cfg.ForensicsEnabled,
-			RunnerImage:           cfg.ForensicsRunnerImage,
-			TempoBaseURL:          cfg.ForensicsTempoBaseURL,
-			WindowMinutes:         cfg.ForensicsWindowMinutes,
-			GCSKeySecret:          cfg.DispatchGCSKeySecret,
-			ResultStoreBucket:     cfg.DispatchResultStoreBucket,
-			ClusterID:             cfg.ClusterID,
-			ForensicsPathTemplate: cfg.PathsForensicsTemplate,
-			LatencyRatio:          cfg.ForensicsLatencyRatio,
-			ErrorRateDelta:        cfg.ForensicsErrorRateDelta,
-			ContextTimeoutMinutes: cfg.ForensicsContextTimeoutMinutes,
-			MinBaselineSamples:    cfg.ForensicsMinBaselineSamples,
-			EnableIssueCreation:   cfg.ForensicsEnableIssueCreation,
-			IssueRepoOwner:        cfg.ForensicsIssueRepoOwner,
+			JobTTLSecondsAfterFinished: int32(cfg.JobTTLSecondsAfterFinished),
+			Enabled:                    cfg.ForensicsEnabled,
+			RunnerImage:                cfg.ForensicsRunnerImage,
+			TempoBaseURL:               cfg.ForensicsTempoBaseURL,
+			WindowMinutes:              cfg.ForensicsWindowMinutes,
+			GCSKeySecret:               cfg.DispatchGCSKeySecret,
+			ResultStoreBucket:          cfg.DispatchResultStoreBucket,
+			ClusterID:                  cfg.ClusterID,
+			ForensicsPathTemplate:      cfg.PathsForensicsTemplate,
+			LatencyRatio:               cfg.ForensicsLatencyRatio,
+			ErrorRateDelta:             cfg.ForensicsErrorRateDelta,
+			ContextTimeoutMinutes:      cfg.ForensicsContextTimeoutMinutes,
+			MinBaselineSamples:         cfg.ForensicsMinBaselineSamples,
+			EnableIssueCreation:        cfg.ForensicsEnableIssueCreation,
+			IssueRepoOwner:             cfg.ForensicsIssueRepoOwner,
 		}, kubeClient)
 		log.Info().Str("image", cfg.ForensicsRunnerImage).Msg("forensics dispatcher enabled")
 	} else {

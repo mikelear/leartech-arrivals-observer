@@ -39,6 +39,11 @@ type Config struct {
 	ResultStoreBucket string
 	ClusterID         string
 
+	// JobTTLSecondsAfterFinished — see dispatch.Args of the same name.
+	// Forensics was the worst offender for un-reaped Jobs: 205 completed
+	// pods on az against 11 on gcp, owned by nothing.
+	JobTTLSecondsAfterFinished int32
+
 	// ForensicsPathTemplate — Go text/template, substituted with
 	// .Cluster .Namespace .Service .Version. Result passed to runner
 	// as FORENSICS_PATH_PREFIX env. Mirrors the post-deploy contract.
@@ -239,6 +244,9 @@ func (d *Dispatcher) buildJob(args Args, jobName string) *batchv1.Job {
 		Spec: batchv1.JobSpec{
 			BackoffLimit:          ptrInt32(backoff),
 			ActiveDeadlineSeconds: &deadline,
+			// See dispatch.Args.JobTTLSecondsAfterFinished. Forensics jobs
+			// were the worst offender: 205 completed pods on az, 11 on gcp.
+			TTLSecondsAfterFinished: ptrInt32(d.cfg.JobTTLSecondsAfterFinished),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{

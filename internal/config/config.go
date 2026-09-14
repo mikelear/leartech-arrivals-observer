@@ -89,7 +89,21 @@ type Config struct {
 	ServicesJSON string `envconfig:"SERVICES_JSON" default:"{}"`
 
 	// Dispatch tunables — parsed by Load() into typed values.
-	DispatchTimeoutMinutes      int    `envconfig:"DISPATCH_TIMEOUT_MINUTES" default:"30"`
+	DispatchTimeoutMinutes int `envconfig:"DISPATCH_TIMEOUT_MINUTES" default:"30"`
+
+	// JobTTLSecondsAfterFinished bounds how long a dispatched Job survives
+	// after it finishes. Counted from COMPLETION, so it cannot cut a run
+	// short — DispatchTimeoutMinutes already does that.
+	//
+	// Without it, nothing reaps these at all: a Job this service creates has
+	// no ownerReference, no helm release and no chart, so neither Kubernetes
+	// nor helm nor a chart audit will ever remove it. Measured 2026-09-14:
+	// 205 completed forensics pods on az against 11 on gcp, and 10,674
+	// un-reaped Jobs estate-wide with the oldest 244 days old.
+	//
+	// 24h by default: long enough to read a failed run's logs the next
+	// morning, short enough that the count stays in double figures.
+	JobTTLSecondsAfterFinished  int    `envconfig:"JOB_TTL_SECONDS_AFTER_FINISHED" default:"86400"`
 	DispatchPollIntervalSeconds int    `envconfig:"DISPATCH_POLL_INTERVAL_SECONDS" default:"30"`
 	DispatchRunnerImage         string `envconfig:"DISPATCH_RUNNER_IMAGE"`
 	// DispatchPlanConformanceRunnerImage is the self-contained conformance
