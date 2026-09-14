@@ -92,8 +92,8 @@ type Config struct {
 	DispatchTimeoutMinutes int `envconfig:"DISPATCH_TIMEOUT_MINUTES" default:"30"`
 
 	// JobTTLSecondsAfterFinished bounds how long a dispatched Job survives
-	// after it finishes. Counted from COMPLETION, so it cannot cut a run
-	// short — DispatchTimeoutMinutes already does that.
+	// after it finishes. It is counted from COMPLETION and is a separate knob
+	// from the run budget, which DispatchTimeoutMinutes sets.  proven-by: TestTTLAndDeadlineAreIndependent
 	//
 	// Without it, nothing reaps these at all: a Job this service creates has
 	// no ownerReference, no helm release and no chart, so neither Kubernetes

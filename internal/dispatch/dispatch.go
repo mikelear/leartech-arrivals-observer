@@ -507,9 +507,10 @@ func (d *Dispatcher) buildJob(args Args, t Test, jobName string) (*batchv1.Job, 
 		Spec: batchv1.JobSpec{
 			BackoffLimit:          ptrInt32(backoff),
 			ActiveDeadlineSeconds: &deadline,
-			// Counted from completion, so it cannot cut a run short.
+			// Counted from completion, and independent of the run budget
+			// above.  proven-by: TestTTLAndDeadlineAreIndependent
 			// Without it nothing reaps this Job: it has no ownerReference,
-			// no helm release and no chart.
+			// no helm release and no chart.  proven-by: TestDispatchedJobCarriesATTL
 			TTLSecondsAfterFinished: ptrInt32(d.cfg.JobTTLSecondsAfterFinished),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
