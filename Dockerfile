@@ -4,7 +4,7 @@
 # Version pinned: Renovate bumps it on each new leartech-go-runtime release.
 
 # ---- build stage ----
-FROM ghcr.io/mikelear/leartech-go-runtime:0.28.0 AS build
+FROM ghcr.io/mikelear/leartech-go-runtime:0.51.10@sha256:2445f8155ceb5785c910344e1df8afcbc7667b16fc527378d42b08d69fcbc314 AS build
 
 # Dependency layer — cached unless go.mod/go.sum change
 COPY go.mod go.sum ./
