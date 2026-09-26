@@ -112,7 +112,7 @@ migrations:
   enabled: false
   image:
     repository: ghcr.io/kukymbr/goose-docker
-    tag: "3.22.1"
+    tag: "3.28.0"
 
 # go-common auth.Config — populated as env vars with AUTH_ prefix
 auth:
