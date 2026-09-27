@@ -19,12 +19,8 @@ import (
 //     `bash run.sh`, upload results.json + artifacts (default playwright
 //     RunnerImage).
 //   - "end2end-ui"       — as above but `npx playwright test`.
-//   - "plan-conformance" — self-contained conformance runner
-//     (dispatch.PlanConformanceRunnerImage; corpus embedded via go:embed).
-//     NO repo clone and NO stagingUrl health probe — runs in-process,
-//     writes ${RESULT_DIR}/results.json in the Gate contract, then
-//     uploads to the same GCS path. Optional PLAN_CONFORMANCE_SPEC (comma-
-//     separated subset) may be passed via Env.
+//
+// An unrecognised type takes the default path. // proven-by: TestBuildJob_DefaultPack_UnchangedPlaywrightPath
 //
 // Resources (optional, pointer so we can distinguish "unset" from
 // "explicit empty") overrides the service-level + global default when
@@ -106,14 +102,8 @@ type Config struct {
 	JobTTLSecondsAfterFinished  int32  `envconfig:"JOB_TTL_SECONDS_AFTER_FINISHED" default:"86400"`
 	DispatchPollIntervalSeconds int    `envconfig:"DISPATCH_POLL_INTERVAL_SECONDS" default:"30"`
 	DispatchRunnerImage         string `envconfig:"DISPATCH_RUNNER_IMAGE"`
-	// DispatchPlanConformanceRunnerImage is the self-contained conformance
-	// runner image used ONLY for packs of type "plan-conformance". Defaults
-	// to the public GHCR image; per-cluster overlays point it at the
-	// version-locked GAR/ACR mirror. Plumbed identically to
-	// DispatchRunnerImage.
-	DispatchPlanConformanceRunnerImage string `envconfig:"DISPATCH_PLAN_CONFORMANCE_RUNNER_IMAGE" default:"ghcr.io/mikelear/leartech-plan-conformance-runner:latest"`
-	DispatchResultStoreBucket          string `envconfig:"DISPATCH_RESULT_STORE_BUCKET"`
-	DispatchGCSKeySecret               string `envconfig:"DISPATCH_GCS_KEY_SECRET" default:"test-artifacts-gcs-key"`
+	DispatchResultStoreBucket   string `envconfig:"DISPATCH_RESULT_STORE_BUCKET"`
+	DispatchGCSKeySecret        string `envconfig:"DISPATCH_GCS_KEY_SECRET" default:"test-artifacts-gcs-key"`
 
 	// Repo discovery for the runner clone step.
 	DispatchRepoHost string `envconfig:"DISPATCH_REPO_HOST" default:"github.com"`

@@ -83,6 +83,7 @@ spec:
                     name: { type: string }
                     type:
                       type: string
+                      # plan-conformance is retired; 68 Arrivals carry it.
                       enum: [end2end, end2end-ui, contract, unit, load, plan-conformance]
                     resources:
                       type: object
@@ -129,6 +130,7 @@ spec:
                     name: { type: string }
                     type:
                       type: string
+                      # plan-conformance is retired; 68 Arrivals carry it.
                       enum: [end2end, end2end-ui, contract, unit, load, plan-conformance]
                     status:
                       type: string

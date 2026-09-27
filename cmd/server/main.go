@@ -114,7 +114,6 @@ func run() error {
 		}
 		dispatcher = dispatch.New(dispatch.Config{
 			RunnerImage:                cfg.DispatchRunnerImage,
-			PlanConformanceRunnerImage: cfg.DispatchPlanConformanceRunnerImage,
 			ResultStoreBucket:          cfg.DispatchResultStoreBucket,
 			GCSKeySecret:               cfg.DispatchGCSKeySecret,
 			ClusterID:                  cfg.ClusterID,
