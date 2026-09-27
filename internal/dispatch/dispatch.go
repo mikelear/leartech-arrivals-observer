@@ -51,14 +51,7 @@ import (
 // Config controls dispatch behaviour. Fields populated from chart values
 // via the observer's ConfigMap (see internal/config/config.go).
 type Config struct {
-	RunnerImage string
-	// PlanConformanceRunnerImage is the self-contained conformance-corpus
-	// runner image used ONLY for packs with Type == "plan-conformance".
-	// The binary embeds the scenario corpus (go:embed) and writes
-	// ${RESULT_DIR}/results.json in the same Gate contract as the other
-	// packs — so no repo clone and no staging-URL health probe are needed.
-	// Plumbed through config.go the same way RunnerImage is.
-	PlanConformanceRunnerImage string
+	RunnerImage                string
 	ResultStoreBucket          string
 	GCSKeySecret               string
 	ClusterID                  string
@@ -122,14 +115,6 @@ type Args struct {
 	// per-pack Test.Resources set. Nil = fall back to Config.Resources.
 	ServiceResources *corev1.ResourceRequirements
 }
-
-// PackTypePlanConformance is the pack Type that selects the
-// plan-conformance code path in buildJob: the self-contained conformance
-// runner image (not the playwright RunnerImage), NO repo clone, NO
-// staging-URL health probe, then the same results.json GCS upload as the
-// default packs. Certifies the orchestrator controller's plan-run
-// machinery deterministically in-process (~seconds).
-const PackTypePlanConformance = "plan-conformance"
 
 // Dispatcher creates Jobs.
 type Dispatcher struct {
@@ -477,16 +462,9 @@ func (d *Dispatcher) buildJob(args Args, t Test, jobName string) (*batchv1.Job, 
 
 	// Select image + inline script by pack type. Default (end2end /
 	// end2end-ui) uses the universal playwright RunnerImage + the
-	// clone+health+test+upload runnerScript. plan-conformance uses the
-	// self-contained conformance runner image + a script that skips the
-	// clone/health steps and just runs the runner then uploads its
-	// results.json to the SAME GCS path contract (verdict path unchanged).
+	// clone+health+test+upload runnerScript.
 	image := d.cfg.RunnerImage
 	script := runnerScript
-	if t.PackType == PackTypePlanConformance {
-		image = d.cfg.PlanConformanceRunnerImage
-		script = planConformanceRunnerScript
-	}
 
 	// Resolve resources with precedence pack > service > global > defensive
 	// fallback. Isolated in a helper so unit tests can pin each rung.
@@ -659,7 +637,7 @@ func resolveEnv(layers ...[]corev1.EnvVar) []corev1.EnvVar {
 // (playwright) runnerScript and the planConformanceRunnerScript: strict
 // mode, the durable-log path, and the log_json helper. Kept as one
 // fragment so the log schema + durability guarantee stay identical
-// across pack types (the plan-conformance path reuses the same Loki
+// across pack types (every path reuses the same Loki
 // view + GCS logs.jsonl upload as end2end / end2end-ui).
 //
 // Log durability: stdout+stderr are teed to /tmp/logs.jsonl for the
@@ -704,7 +682,7 @@ log_json() {
 // and a results.json in the current working directory. Does NOT upload
 // Playwright artifacts (that stays in the default runnerScript) and does
 // NOT do the end2end exit-translation (only the default path needs it;
-// the conformance runner already exits non-zero on failure).
+// a runner that already exits non-zero on failure).
 const resultsUploadFragment = `
 # Auth gcloud once for all uploads.
 gcloud auth activate-service-account --key-file="$GOOGLE_APPLICATION_CREDENTIALS" 2>/dev/null || \
@@ -876,48 +854,6 @@ if [ "$TEST_PACK_TYPE" = "end2end" ] && [ "$TEST_EXIT" -eq 0 ] && [ -f results.j
   fi
 fi
 ` + logsUploadFragment
-
-// planConformanceRunnerScript is the inline bash for a "plan-conformance"
-// pack. It runs the self-contained conformance runner (which embeds the
-// scenario corpus + writes ${RESULT_DIR}/results.json in the Gate
-// contract and exits non-zero on failure) then uploads that results.json
-// to the SAME GCS path contract as the default packs — so leartech-gate
-// reads the verdict identically and NO controller change is needed.
-//
-// Deliberately does NOT clone the service repo and does NOT health-probe
-// STAGING_URL: this pack is a deterministic in-process L1 test with no
-// staging URL. RESULT_DIR is the runner's cwd so the shared
-// resultsUploadFragment (which reads ./results.json) uploads it.
-// PLAN_CONFORMANCE_SPEC (optional comma-separated subset) is passed
-// through from the pack's Env when set; the runner defaults to the full
-// embedded corpus otherwise.
-const planConformanceRunnerScript = scriptPrologue + `
-log_json info pack_runner_start \
-  msg="plan-conformance runner started" \
-  packType="${TEST_PACK_TYPE:-}" \
-  spec="${PLAN_CONFORMANCE_SPEC:-}"
-echo "==> arrival=$ARRIVAL_NAME service=$SERVICE version=$VERSION pack=$TEST_PACK type=$TEST_PACK_TYPE" | tee -a "$LOG_PATH"
-echo "==> cluster=$CLUSTER_ID namespace=$NAMESPACE bucket=$RESULT_STORE_BUCKET" | tee -a "$LOG_PATH"
-echo "==> resultPathPrefix=$RESULT_STORE_PATH_PREFIX" | tee -a "$LOG_PATH"
-
-# From this point on, every stdout+stderr line is also captured to $LOG_PATH.
-exec > >(tee -a "$LOG_PATH") 2>&1
-
-# RESULT_DIR is the runner's cwd so results.json lands where the shared
-# upload fragment reads it. No repo clone, no staging-URL health probe —
-# the conformance corpus is embedded in the runner image and runs
-# in-process against a fake client (deterministic, ~seconds).
-WORK=/tmp/work
-mkdir -p "$WORK" && cd "$WORK"
-export RESULT_DIR="$WORK"
-
-TEST_EXIT=0
-# The runner image's entrypoint is the conformance binary; invoke it via
-# its default command. It honours RESULT_DIR + optional PLAN_CONFORMANCE_SPEC
-# and exits 0 iff all scenarios passed.
-plan-conformance-runner || TEST_EXIT=$?
-echo "==> conformance runner exit=$TEST_EXIT"
-` + resultsUploadFragment + logsUploadFragment
 
 // jobNameFor builds the K8s Job name for an arrival × pack pair.
 //
