@@ -196,6 +196,8 @@ github.com/mikelear/leartech-go-common v1.4.2 h1:17wn3IpjRwLv7gd0lILEW6gW3GcLaYV
 github.com/mikelear/leartech-go-common v1.4.2/go.mod h1:NJpq4zPpOF1JOB1+6bRmLDgXe/55/7EROPRQHwpb0QQ=
 github.com/mikelear/leartech-go-common v1.4.3 h1:y0a2Aoxu17JRCNPyoBEDpsxcE06DQjUwDQjf40H5/w8=
 github.com/mikelear/leartech-go-common v1.4.3/go.mod h1:NJpq4zPpOF1JOB1+6bRmLDgXe/55/7EROPRQHwpb0QQ=
+github.com/mikelear/leartech-go-common v1.6.1 h1:l3v3D9rq1udzb+H+Ecu7gMucL0xMUMMTHplHZ9Gsd6U=
+github.com/mikelear/leartech-go-common v1.6.1/go.mod h1:NJpq4zPpOF1JOB1+6bRmLDgXe/55/7EROPRQHwpb0QQ=
 github.com/mitchellh/copystructure v1.2.0 h1:vpKXTN4ewci03Vljg/q9QvCGUDttBOGBIa15WveJJGw=
 github.com/mitchellh/copystructure v1.2.0/go.mod h1:qLl+cE2AmVv+CoeAwDPye/v+N2HKCj9FbZEVFJRxO9s=
 github.com/mitchellh/reflectwalk v1.0.2 h1:G2LzWKi524PWgd3mLHV8Y5k7s6XUvT0Gef6zxSIeXaQ=
