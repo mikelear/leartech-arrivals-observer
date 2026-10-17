@@ -485,6 +485,7 @@ helm.sh/helm/v3 v3.22.0/go.mod h1:EVl/147Ai2z13JOykbO1Jn9HRaXyU7uHlbAJmODq/Fg=
 helm.sh/helm/v3 v3.22.1 h1:uo2SouzAxMkKZTNzZ1lLP/c/Bu7xfUJKYDaYMxMHvk8=
 helm.sh/helm/v3 v3.22.1/go.mod h1:FNQoawxnIIReGrTytJc55tKakylfpaC3pGf64BGo1rI=
 helm.sh/helm/v4 v4.0.0/go.mod h1:G1Y5AE+lJPQSAjh7nbXnhZrtGtxo+I6POSu9DruYiGI=
+helm.sh/helm/v4 v4.1.4/go.mod h1:5dSo8rRgn3OTkDAc/k0Ipw5/Q+BlqKIKZwa0XwSiINI=
 k8s.io/api v0.36.3 h1:NxB+05W2UGqXWFXcLO0RB5cnqnUPP5v5sVlaOH0Iz4w=
 k8s.io/api v0.36.3/go.mod h1:JzLQKqRHC5+I8RVj/lS3lCg0mg6nWI9Fo/Sk3ElxHzg=
 k8s.io/api v0.37.1 h1:l6N77U7tjwB5L056bgrBTJIEdevac/naBZ3iSvDNfpM=
