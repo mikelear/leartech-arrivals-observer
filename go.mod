@@ -13,7 +13,7 @@ require (
 	github.com/rs/zerolog v1.35.1
 	github.com/stretchr/testify v1.12.1
 	go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin v0.72.0
-	helm.sh/helm/v3 v3.22.1
+	helm.sh/helm/v4 v4.0.0
 	helm.sh/helm/v4 v4.0.0
 	k8s.io/api v0.37.1
 	k8s.io/apiextensions-apiserver v0.37.1
